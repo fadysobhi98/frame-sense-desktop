@@ -478,7 +478,7 @@ pub fn import_camera_files(
         duplicates,
         skipped_unsupported,
         camera_id: camera_id.to_string(),
-        destination: destination_dir.to_string_lossy().to_string(),
+        destination: display_path(&destination_dir),
     })
 }
 
@@ -550,8 +550,6 @@ pub fn run_auto_correct(
         return Err("The output folder must not be inside Originals.".into());
     }
     let output_camera_dir = output_root.join(camera_id);
-    fs::create_dir_all(&output_camera_dir)
-        .map_err(|e| format!("Could not create the output camera folder: {e}"))?;
 
     let params_key = format!("{SMART_BASIC_PARAMS_VERSION}:q{quality}");
 
@@ -576,6 +574,10 @@ pub fn run_auto_correct(
         .collect();
 
     let total = files.len();
+    if total > 0 {
+        fs::create_dir_all(&output_camera_dir)
+            .map_err(|e| format!("Could not create the output camera folder: {e}"))?;
+    }
     let mut processed = 0usize;
     let mut already_done = 0usize;
     let mut failed: Vec<AutoCorrectFailure> = Vec::new();
@@ -667,7 +669,135 @@ pub fn run_auto_correct(
         processed,
         already_done,
         failed,
-        output_dir: output_camera_dir.to_string_lossy().to_string(),
+        output_dir: display_path(&output_camera_dir),
+    })
+}
+
+/// Windows extended-length prefix (\\?\) from canonicalize is confusing to
+/// show and breaks string comparisons; strip it for display.
+/// Absolute path without the Windows extended-length prefix, so path
+/// comparisons and display strings behave the same on every platform.
+fn normalize_abs(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy().to_string();
+    match text.strip_prefix(r"\\?\") {
+        Some(stripped) => PathBuf::from(stripped),
+        None => path,
+    }
+}
+
+fn display_path(path: &Path) -> String {
+    let text = path.to_string_lossy().to_string();
+    text.strip_prefix(r"\\?\")
+        .map(str::to_string)
+        .unwrap_or(text)
+}
+
+/// Auto-correct every supported photo in a folder, with no project needed.
+///
+/// This is the simple flow: pick a folder of photos, pick (or default) an
+/// output folder, every RAW/JPEG inside gets a corrected JPEG next to it in
+/// the output folder. Originals are never modified. Files whose corrected
+/// JPEG already exists in the output folder are skipped, so re-runs are
+/// cheap. The output folder's own contents are never scanned as input.
+pub fn run_auto_correct_folder(
+    folder_path: &str,
+    output_dir: Option<&str>,
+    quality: u8,
+    correct: &dyn Fn(&Path, &Path, u8) -> Result<(), String>,
+    progress: &dyn Fn(AutoCorrectProgress),
+) -> Result<AutoCorrectReport, String> {
+    let quality = quality.clamp(50, 100);
+    let folder_root = normalize_abs(
+        PathBuf::from(folder_path.trim())
+            .canonicalize()
+            .map_err(|e| format!("Folder not found: {e}"))?,
+    );
+    if !folder_root.is_dir() {
+        return Err("The photo source must be a folder.".into());
+    }
+
+    // No filesystem writes yet: scan first, and only create the output
+    // folder when there is at least one photo to correct.
+    let output_root = match output_dir.map(str::trim).filter(|d| !d.is_empty()) {
+        Some(picked) => normalize_abs(
+            std::path::absolute(PathBuf::from(picked))
+                .map_err(|e| format!("Output folder not usable: {e}"))?,
+        ),
+        None => folder_root.join("Frame Sense Corrected"),
+    };
+    if output_root == folder_root || folder_root.starts_with(&output_root) {
+        return Err(
+            "The output folder must not be the same as, or contain, the photo folder.".into(),
+        );
+    }
+
+    let mut files: Vec<PathBuf> = WalkDir::new(&folder_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+        .map(|e| e.into_path())
+        .filter(|p| !p.starts_with(&output_root))
+        .filter(|p| is_supported_photo(p))
+        .collect();
+    files.sort();
+
+    let total = files.len();
+    if total > 0 {
+        fs::create_dir_all(&output_root)
+            .map_err(|e| format!("Could not create the output folder: {e}"))?;
+    }
+    let mut processed = 0usize;
+    let mut already_done = 0usize;
+    let mut failed: Vec<AutoCorrectFailure> = Vec::new();
+
+    for (index, source_file) in files.into_iter().enumerate() {
+        let name = source_file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("image")
+            .to_string();
+        progress(AutoCorrectProgress {
+            current: index + 1,
+            total,
+            file: name.clone(),
+            processed,
+            failed: failed.len(),
+        });
+
+        let stem = source_file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("image");
+        let expected = output_root.join(format!("{stem}.jpg"));
+        if expected.is_file() {
+            already_done += 1;
+            continue;
+        }
+        let output_file = unique_destination(&output_root, &format!("{stem}.jpg"));
+        match correct(&source_file, &output_file, quality) {
+            Ok(()) => processed += 1,
+            Err(e) => {
+                let _ = fs::remove_file(&output_file);
+                failed.push(AutoCorrectFailure { file: name, error: e });
+            }
+        }
+    }
+
+    progress(AutoCorrectProgress {
+        current: total,
+        total,
+        file: String::new(),
+        processed,
+        failed: failed.len(),
+    });
+
+    Ok(AutoCorrectReport {
+        total,
+        processed,
+        already_done,
+        failed,
+        output_dir: display_path(&output_root),
     })
 }
 
@@ -1082,6 +1212,145 @@ mod tests {
         // Auto-correct resolves the moved file through the recorded absolute path.
         let report = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}).unwrap();
         assert_eq!(report.processed, 1);
+    }
+
+
+    /// Folder mode: any folder of photos works without a project or import,
+    /// subfolders included, originals untouched, default output created.
+    #[test]
+    fn folder_mode_processes_any_folder() {
+        let photos = TestDir::new("fold-photos");
+        write_file(photos.path(), "IMG_0001.cr2", &[3u8; 256]);
+        write_file(photos.path(), "sub/DCIM/IMG_0002.NEF", &[4u8; 256]);
+        write_file(photos.path(), "notes.txt", b"not a photo");
+        let src = photos.path().join("IMG_0001.cr2");
+        let hash_before = sha256_file(&src).unwrap();
+
+        let report = run_auto_correct_folder(
+            photos.path().to_str().unwrap(),
+            None,
+            90,
+            &fake_correct_ok,
+            &|_| {},
+        )
+        .unwrap();
+
+        assert_eq!(report.total, 2);
+        assert_eq!(report.processed, 2);
+        let out = PathBuf::from(&report.output_dir);
+        assert!(out.join("IMG_0001.jpg").exists());
+        assert!(out.join("IMG_0002.jpg").exists());
+        assert!(out.ends_with("Frame Sense Corrected"));
+        assert!(!out.to_string_lossy().starts_with(r"\\?\"), "no extended prefix in display path");
+        assert_eq!(hash_before, sha256_file(&src).unwrap());
+    }
+
+    /// Folder mode with zero photos: report says 0 and NO folders are created.
+    #[test]
+    fn folder_mode_zero_photos_creates_nothing() {
+        let photos = TestDir::new("fold-empty");
+        write_file(photos.path(), "readme.txt", b"no photos here");
+
+        let report = run_auto_correct_folder(
+            photos.path().to_str().unwrap(),
+            None,
+            90,
+            &fake_correct_ok,
+            &|_| {},
+        )
+        .unwrap();
+        assert_eq!(report.total, 0);
+        assert_eq!(report.processed, 0);
+        assert!(!photos.path().join("Frame Sense Corrected").exists());
+
+        // Same for a picked output folder that does not exist yet.
+        let picked = photos.path().join("would-be-output");
+        let report = run_auto_correct_folder(
+            photos.path().to_str().unwrap(),
+            Some(picked.to_str().unwrap()),
+            90,
+            &fake_correct_ok,
+            &|_| {},
+        )
+        .unwrap();
+        assert_eq!(report.total, 0);
+        assert!(!picked.exists());
+    }
+
+    /// Folder mode re-runs skip finished photos and never re-scan its own output.
+    #[test]
+    fn folder_mode_rerun_is_stable() {
+        let photos = TestDir::new("fold-rerun");
+        write_file(photos.path(), "a.cr2", &[8u8; 128]);
+
+        let first = run_auto_correct_folder(photos.path().to_str().unwrap(), None, 90, &fake_correct_ok, &|_| {}).unwrap();
+        assert_eq!(first.processed, 1);
+        let second = run_auto_correct_folder(photos.path().to_str().unwrap(), None, 90, &fake_correct_ok, &|_| {}).unwrap();
+        assert_eq!(second.total, 1, "output JPEGs must not be re-scanned as input");
+        assert_eq!(second.processed, 0);
+        assert_eq!(second.already_done, 1);
+        let out = PathBuf::from(&first.output_dir);
+        assert_eq!(fs::read_dir(&out).unwrap().count(), 1, "no duplicate outputs");
+    }
+
+    /// Folder mode rejects output folders that would swallow the source.
+    #[test]
+    fn folder_mode_output_guards() {
+        let photos = TestDir::new("fold-guard");
+        write_file(photos.path(), "a.cr2", &[8u8; 128]);
+
+        let same = run_auto_correct_folder(
+            photos.path().to_str().unwrap(),
+            Some(photos.path().to_str().unwrap()),
+            90,
+            &fake_correct_ok,
+            &|_| {},
+        );
+        assert!(same.is_err());
+
+        let parent = TestDir::new("fold-guard-parent");
+        let inside = parent.path().join("photos");
+        fs::create_dir_all(&inside).unwrap();
+        write_file(&inside, "a.cr2", &[8u8; 128]);
+        let swallowing = run_auto_correct_folder(
+            inside.to_str().unwrap(),
+            Some(parent.path().to_str().unwrap()),
+            90,
+            &fake_correct_ok,
+            &|_| {},
+        );
+        assert!(swallowing.is_err());
+    }
+
+    /// Folder mode collects per-file failures and removes partial output.
+    #[test]
+    fn folder_mode_collects_failures() {
+        let photos = TestDir::new("fold-fail");
+        write_file(photos.path(), "bad.cr2", &[1u8; 64]);
+        let report = run_auto_correct_folder(
+            photos.path().to_str().unwrap(),
+            None,
+            90,
+            &fake_correct_fail,
+            &|_| {},
+        )
+        .unwrap();
+        assert_eq!(report.processed, 0);
+        assert_eq!(report.failed.len(), 1);
+        assert!(PathBuf::from(&report.output_dir).read_dir().unwrap().next().is_none());
+    }
+
+    /// Project lane mode with an empty lane reports 0 and creates nothing.
+    #[test]
+    fn project_mode_empty_lane_creates_nothing() {
+        let base = TestDir::new("empty-lane-base");
+        let project = make_project(&base);
+        // Remove the pre-created Export folder tree so we can prove no recreation.
+        let export = PathBuf::from(&project.project_path).join("Export");
+        fs::remove_dir_all(&export).unwrap();
+        let report = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}).unwrap();
+        assert_eq!(report.total, 0);
+        assert!(!export.exists());
     }
 
     /// Import rejects anything but Camera 1 / Camera 2.

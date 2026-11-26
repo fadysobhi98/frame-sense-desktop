@@ -177,6 +177,26 @@ fn raw_engine_status() -> RawEngineStatus {
 }
 
 #[command]
+fn auto_correct_folder(
+    folder_path: String,
+    output_dir: Option<String>,
+    quality: Option<u8>,
+    on_progress: tauri::ipc::Channel<core::AutoCorrectProgress>,
+) -> Result<core::AutoCorrectReport, String> {
+    engine()?;
+    let quality = quality.unwrap_or(core::DEFAULT_JPEG_QUALITY);
+    core::run_auto_correct_folder(
+        &folder_path,
+        output_dir.as_deref(),
+        quality,
+        &engine_correct,
+        &|p| {
+            let _ = on_progress.send(p);
+        },
+    )
+}
+
+#[command]
 fn auto_correct_camera(
     project_path: String,
     camera_id: String,
@@ -206,6 +226,7 @@ pub fn run() {
             create_project,
             import_camera_files,
             auto_correct_camera,
+            auto_correct_folder,
             raw_engine_status
         ])
         .run(tauri::generate_context!())

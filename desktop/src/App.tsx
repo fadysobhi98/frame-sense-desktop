@@ -93,6 +93,7 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
   const [destinationDir, setDestinationDir] = useState("");
+  const [folderSource, setFolderSource] = useState("");
   const [outputDir, setOutputDir] = useState("");
   const [quality, setQuality] = useState(90);
   const [acProgress, setAcProgress] = useState<AutoCorrectProgress | null>(null);
@@ -149,6 +150,33 @@ const toggleFullscreen = async () => {
     console.error(error);
   }
 };
+  function finishAutoCorrect(report: AutoCorrectReport) {
+    setAcReport(report);
+    if (report.total === 0) {
+      setMessage("Found 0 photos in that folder. The app looks for RAW and JPEG photos, including inside subfolders.");
+    } else {
+      setMessage(`Auto-correction finished: ${report.processed} corrected, ${report.already_done} already done, ${report.failed.length} failed.`);
+    }
+  }
+
+  async function startFolderCorrect() {
+    setError(""); setMessage(""); setAcReport(null);
+    setAcBusy(true);
+    setAcProgress({ current: 0, total: 0, file: "", processed: 0, failed: 0 });
+    const channel = new Channel<AutoCorrectProgress>();
+    channel.onmessage = (p) => setAcProgress(p);
+    try {
+      const report = await invoke<AutoCorrectReport>("auto_correct_folder", {
+        folderPath: folderSource, outputDir: outputDir.trim() || null, quality, onProgress: channel
+      });
+      finishAutoCorrect(report);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setAcBusy(false);
+    }
+  }
+
   async function startAutoCorrect() {
     setError(""); setMessage(""); setAcReport(null);
     setAcBusy(true);
@@ -159,8 +187,7 @@ const toggleFullscreen = async () => {
       const report = await invoke<AutoCorrectReport>("auto_correct_camera", {
         projectPath, cameraId, outputDir: outputDir.trim() || null, quality, onProgress: channel
       });
-      setAcReport(report);
-      setMessage(`Auto-correction finished: ${report.processed} corrected, ${report.already_done} already done, ${report.failed.length} failed.`);
+      finishAutoCorrect(report);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -347,15 +374,39 @@ const toggleFullscreen = async () => {
           {page === "Processing Center" && (
             <div className="two-column">
               <section className="panel">
-                <div className="panel-heading"><div><span className="step-tag">03 / AUTO-CORRECT</span><h3>Smart Basic auto-correction</h3><p>Fixes exposure and contrast on the camera lane. Not AI. Original RAW files stay untouched; corrected 8-bit JPEGs go to the output folder.</p></div><WandSparkles/></div>
-                <label>Project folder<input value={projectPath} onChange={(e) => setProjectPath(e.target.value)} placeholder="Create a project first, or paste its path"/></label>
-                <label>Camera lane<select value={cameraId} onChange={(e) => setCameraId(e.target.value)}><option>Camera 1</option><option>Camera 2</option></select></label>
+                <div className="panel-heading"><div><span className="step-tag">AUTO-CORRECT A FOLDER</span><h3>Smart Basic auto-correction</h3><p>Pick any folder of photos. Every RAW and JPEG inside (including subfolders) gets automatic exposure and contrast correction. Not AI. Originals stay untouched; corrected 8-bit JPEGs go to the output folder.</p></div><WandSparkles/></div>
+                <label>Photo folder</label>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <input
+                    value={folderSource}
+                    readOnly
+                    placeholder="Choose a folder of photos..."
+                    style={{ flex: 1, minWidth: 0 }}
+                  />
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={async () => {
+                      const selected = await openDialog({
+                        directory: true,
+                        multiple: false,
+                        title: "Choose a folder of photos",
+                      });
+                      if (typeof selected === "string") {
+                        setFolderSource(selected);
+                      }
+                    }}
+                  >
+                    <FolderOpen size={16} />
+                    Browse
+                  </button>
+                </div>
                 <label>Output folder (optional)</label>
                 <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                   <input
                     value={outputDir}
                     readOnly
-                    placeholder="Default: the project's Export folder"
+                    placeholder="Default: 'Frame Sense Corrected' inside the photo folder"
                     style={{ flex: 1, minWidth: 0 }}
                   />
                   <button
@@ -382,10 +433,10 @@ const toggleFullscreen = async () => {
                   )}
                 </div>
                 <label>JPEG quality: {quality}<input type="range" min={50} max={100} value={quality} onChange={(e) => setQuality(Number(e.target.value))}/></label>
-                <button className="primary-button full" disabled={acBusy || !projectPath.trim() || engineStatus?.available === false} onClick={startAutoCorrect}>
-                  {acBusy ? <RefreshCw className="spin" size={16}/> : <WandSparkles size={16}/>} Start auto-correction
+                <button className="primary-button full" disabled={acBusy || !folderSource.trim() || engineStatus?.available === false} onClick={startFolderCorrect}>
+                  {acBusy ? <RefreshCw className="spin" size={16}/> : <WandSparkles size={16}/>} Correct this folder
                 </button>
-                {acProgress && acProgress.total > 0 && (
+                {acProgress && acBusy && acProgress.total > 0 && (
                   <div className="import-summary">
                     <strong>{acProgress.current} / {acProgress.total}</strong>
                     <span>{acProgress.file}</span>
@@ -397,16 +448,27 @@ const toggleFullscreen = async () => {
                 {acReport && (
                   <div className="import-summary">
                     <strong>Auto-correction report</strong>
+                    <span>Photos found: {acReport.total}</span>
                     <span>Corrected: {acReport.processed}</span>
                     <span>Already done (skipped): {acReport.already_done}</span>
                     <span>Failed: {acReport.failed.length}</span>
-                    <small>{acReport.output_dir}</small>
+                    {acReport.total > 0 && <small>{acReport.output_dir}</small>}
                     {acReport.failed.slice(0, 5).map((f) => (
                       <small key={f.file}>{f.file}: {f.error}</small>
                     ))}
                   </div>
                 )}
-                <p className="field-note">Automatic exposure and contrast only. It does not smooth skin, remove objects or restyle the photo. Re-running skips photos already done at the same quality.</p>
+                <p className="field-note">Automatic exposure and contrast only. It does not smooth skin, remove objects or restyle the photo. Re-running skips photos that already have a corrected copy.</p>
+              </section>
+
+              <section className="panel">
+                <div className="panel-heading"><div><span className="step-tag">FROM A PROJECT</span><h3>Correct a project camera lane</h3><p>For photos already imported into a Frame Sense project. Same correction, per camera lane.</p></div><Gauge/></div>
+                <label>Project folder<input value={projectPath} onChange={(e) => setProjectPath(e.target.value)} placeholder="Create a project first, or paste its path"/></label>
+                <label>Camera lane<select value={cameraId} onChange={(e) => setCameraId(e.target.value)}><option>Camera 1</option><option>Camera 2</option></select></label>
+                <button className="secondary-button full" disabled={acBusy || !projectPath.trim() || engineStatus?.available === false} onClick={startAutoCorrect}>
+                  {acBusy ? <RefreshCw className="spin" size={16}/> : <WandSparkles size={16}/>} Correct this camera lane
+                </button>
+                <p className="field-note">Uses the same output folder and quality as above (default: the project's Export folder). If it reports 0 photos, import the card first on Projects &amp; Import — or just use folder correction above.</p>
               </section>
 
               <section className="panel">
@@ -433,7 +495,7 @@ const toggleFullscreen = async () => {
           <footer className="content-footer">
             <span><ShieldCheck size={14}/> Local-first by design</span>
             <span><CircleHelp size={14}/> Starter scaffold · not a finished product</span>
-            <span><Command size={14}/> v0.2.0</span>
+            <span><Command size={14}/> v0.2.1</span>
           </footer>
         </div>
       </main>
