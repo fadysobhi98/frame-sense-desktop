@@ -145,8 +145,8 @@ pub fn denoise(rgb: &mut Rgb32FImage) -> f32 {
     let sig_cb = estimate_sigma(&cb, w, h);
     let sig_cr = estimate_sigma(&cr, w, h);
     // strength 0 on clean photos, full by sigma ~0.025 (about ISO 6400 look)
-    let s_y = ((sig_y - 0.003) / 0.022).clamp(0.0, 1.0);
-    let s_c = ((sig_cb.max(sig_cr) - 0.002) / 0.015).clamp(0.0, 1.0);
+    let s_y = ((sig_y - 0.002) / 0.016).clamp(0.0, 1.0);
+    let s_c = ((sig_cb.max(sig_cr) - 0.001) / 0.010).clamp(0.0, 1.0);
     if s_y <= 0.0 && s_c <= 0.0 {
         return sig_y;
     }

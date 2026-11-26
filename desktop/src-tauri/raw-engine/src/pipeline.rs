@@ -19,6 +19,8 @@ pub enum Look {
     AmberIndoor,
     BrightAiry,
     Cinematic,
+    Cool,
+    Punchy,
 }
 
 /// Grade parameters behind a session tone.
@@ -52,11 +54,13 @@ impl Look {
             4 => Look::AmberIndoor,
             5 => Look::BrightAiry,
             6 => Look::Cinematic,
+            7 => Look::Cool,
+            8 => Look::Punchy,
             _ => Look::Warm,
         }
     }
     /// All session tones, in menu order.
-    pub fn all() -> [Look; 7] {
+    pub fn all() -> [Look; 9] {
         [
             Look::Natural,
             Look::Warm,
@@ -65,6 +69,8 @@ impl Look {
             Look::AmberIndoor,
             Look::BrightAiry,
             Look::Cinematic,
+            Look::Cool,
+            Look::Punchy,
         ]
     }
     fn params(self) -> LookParams {
@@ -80,18 +86,15 @@ impl Look {
             contrast_bias: 0.0,
         };
         match self {
-            Look::Natural => LookParams { warmth: 0.15, split: 0.5, ..BASE },
-            Look::Warm => LookParams { warmth: 0.7, saturation_boost: 0.03, ..BASE },
-            Look::Golden => LookParams { warmth: 1.0, split: 1.15, saturation_boost: 0.06, ..BASE },
-            // Peach-gold: warm with a soft peach tint (kaze-style glow)
-            Look::PeachGold => LookParams { warmth: 0.8, tint_r: 0.020, tint_g: 0.006, saturation_boost: 0.04, cream: 0.4, ..BASE },
-            // Amber indoor: deep warm for tungsten venues, split reaches shadows
-            Look::AmberIndoor => LookParams { warmth: 0.9, split: 1.2, split_shadow: 0.35, saturation_boost: 0.04, ..BASE },
-            // Bright airy: gentle warmth, lifted blacks, soft contrast (wedding)
-            Look::BrightAiry => LookParams { warmth: 0.45, split: 0.6, saturation_boost: 0.02, black_floor: 0.025, cream: 0.6, contrast_bias: -0.03, ..BASE },
-            // Cinematic: film-like faded blacks, creamy highlights, slightly
-            // restrained saturation
-            Look::Cinematic => LookParams { warmth: 0.55, split: 0.85, saturation_boost: -0.02, black_floor: 0.05, cream: 1.0, contrast_bias: -0.02, ..BASE },
+            Look::Natural => LookParams { warmth: 0.0, ..BASE },
+            Look::Warm => LookParams { warmth: 1.2, saturation_boost: 0.03, ..BASE },
+            Look::Golden => LookParams { warmth: 3.4, split: 1.8, saturation_boost: 0.10, ..BASE },
+            Look::PeachGold => LookParams { warmth: 2.0, tint_r: 0.06, tint_g: 0.025, saturation_boost: 0.04, cream: 0.5, ..BASE },
+            Look::AmberIndoor => LookParams { warmth: 4.6, split: 2.2, split_shadow: 0.7, saturation_boost: 0.08, ..BASE },
+            Look::BrightAiry => LookParams { warmth: 0.5, split: 0.6, black_floor: 0.04, cream: 0.8, contrast_bias: -0.05, ..BASE },
+            Look::Cinematic => LookParams { warmth: 0.4, split: 0.8, black_floor: 0.10, cream: 1.0, contrast_bias: -0.06, ..BASE },
+            Look::Cool => LookParams { warmth: 0.0, ..BASE },
+            Look::Punchy => LookParams { warmth: 0.5, saturation_boost: 0.25, contrast_bias: 0.15, ..BASE },
         }
     }
 }
@@ -389,7 +392,7 @@ pub fn apply_plan(rgb: &mut Rgb32FImage, plan: &CorrectionPlan) {
             let skin = is_skinish(r, g, b);
             // Warmth sits mostly on skin and mid-tones; neutral walls and
             // clothes stay close to neutral so the cast never looks orange.
-            let mut w = if skin { plan.warmth * 0.10 } else { plan.warmth * 0.10 };
+            let mut w = if skin { plan.warmth * 0.14 } else { plan.warmth * 0.24 };
             // Keep bright near-neutral surfaces (white satin, veils, suits)
             // clean white: the warm grade belongs on skin, light and
             // mid-tones, not on whites.
@@ -399,7 +402,7 @@ pub fn apply_plan(rgb: &mut Rgb32FImage, plan: &CorrectionPlan) {
                 let sat = if mx > 1e-4 { (mx - r.min(g).min(b)) / mx } else { 0.0 };
                 let wp = smoothstep(((lum * plan.gain.max(0.5) - 0.45) / 0.3).clamp(0.0, 1.0))
                     * (1.0 - (sat * 5.0).clamp(0.0, 1.0));
-                w *= 1.0 - 0.9 * wp;
+                w *= 1.0 - 0.6 * wp;
             }
             r *= 1.0 + 0.16 * w;
             g *= 1.0 - 0.032 * w;
@@ -609,6 +612,56 @@ pub fn sample_lumas(rgb: &Rgb32FImage) -> Vec<f32> {
     lumas
 }
 
+/// Final per-tone character so each session tone is visibly different.
+/// Plain pixel maths (no AI, no LUT files).
+fn tone_finish(rgb: &mut Rgb32FImage, look: Look) {
+    for px in rgb.pixels_mut() {
+        let [mut r, mut g, mut b] = px.0;
+        let l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        let desat = |r: &mut f32, g: &mut f32, b: &mut f32, k: f32| {
+            let y = 0.2126 * *r + 0.7152 * *g + 0.0722 * *b;
+            *r = y + (*r - y) * k;
+            *g = y + (*g - y) * k;
+            *b = y + (*b - y) * k;
+        };
+        match look {
+            Look::Cool => {
+                let k = if is_skinish(r, g, b) { 0.4 } else { 1.0 };
+                r *= 1.0 - 0.12 * k;
+                b *= 1.0 + 0.16 * k;
+                g *= 1.0 + 0.01 * k;
+            }
+            Look::Cinematic => {
+                // matte: flat and desaturated, shadows teal, highlights soft
+                desat(&mut r, &mut g, &mut b, 0.78);
+                let sh = (1.0 - l / 0.4).clamp(0.0, 1.0);
+                r -= 0.02 * sh;
+                b += 0.03 * sh;
+                let top = 0.94;
+                r = r.min(top) * 0.98 + 0.01;
+                g = g.min(top) * 0.98 + 0.01;
+                b = b.min(top) * 0.98 + 0.01;
+            }
+            Look::Punchy => {
+                let f = |x: f32| (x + 0.65 * (smoothstep(x) - x)).clamp(0.0, 1.0);
+                r = f(r);
+                g = f(g);
+                b = f(b);
+            }
+            Look::BrightAiry => {
+                let m = (1.0 - (l - 0.5).abs() * 2.0).clamp(0.0, 1.0);
+                let lift = 1.0 + 0.12 * m;
+                r = (r * lift).min(1.0);
+                g = (g * lift).min(1.0);
+                b = (b * lift).min(1.0);
+                desat(&mut r, &mut g, &mut b, 0.92);
+            }
+            _ => {}
+        }
+        px.0 = [r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0)];
+    }
+}
+
 pub fn auto_correct(image: &DynamicImage, look: Look) -> DynamicImage {
     let mut rgb = image.to_rgb32f();
     if rgb.width() == 0 || rgb.height() == 0 {
@@ -620,6 +673,7 @@ pub fn auto_correct(image: &DynamicImage, look: Look) -> DynamicImage {
     local_tone_map(&mut rgb, 0.5);
     let plan = plan_for_image(&rgb, look);
     apply_plan(&mut rgb, &plan);
+    tone_finish(&mut rgb, look);
     DynamicImage::ImageRgb32F(rgb)
 }
 

@@ -100,13 +100,15 @@ function App() {
   const [quality, setQuality] = useState(90);
   const [look, setLook] = useState("warm");
   const TONES: { id: string; label: string; hint: string }[] = [
-    { id: "natural", label: "Natural", hint: "True-to-life, gentle correction only" },
-    { id: "warm", label: "Warm Golden", hint: "Golden-hour warmth, the default" },
-    { id: "golden", label: "Golden+", hint: "Strongest warm orange grade" },
-    { id: "peach", label: "Peach-Gold", hint: "Soft peach glow, creamy highlights" },
-    { id: "amber", label: "Amber Indoor", hint: "Deep warm for tungsten/dark venues" },
+    { id: "natural", label: "Natural", hint: "True-to-life colours, no warm tint" },
+    { id: "warm", label: "Warm Golden", hint: "Gentle golden warmth, the default" },
+    { id: "golden", label: "Golden+", hint: "Strong orange-gold glow" },
+    { id: "peach", label: "Peach-Gold", hint: "Soft pink-peach glow, creamy highlights" },
+    { id: "amber", label: "Amber Indoor", hint: "Deep amber, warm shadows too" },
     { id: "airy", label: "Bright Airy", hint: "Light, lifted, soft wedding look" },
-    { id: "cinematic", label: "Cinematic", hint: "Film look: faded blacks, creamy highlights" },
+    { id: "cinematic", label: "Matte Film", hint: "Flat faded matte, muted colours" },
+    { id: "cool", label: "Cool Clean", hint: "Cooler blue-ish whites, crisp" },
+    { id: "punchy", label: "High Contrast", hint: "Strong contrast and rich colour" },
   ];
   const [bw, setBw] = useState(true);
   const [toneSuggestion, setToneSuggestion] = useState<{ tone: string; reason: string; probed: number } | null>(null);
@@ -663,7 +665,7 @@ const toggleFullscreen = async () => {
           <footer className="content-footer">
             <span><ShieldCheck size={14}/> Local-first by design</span>
             <span><CircleHelp size={14}/> Everything runs on this PC - originals are never changed</span>
-            <span><Command size={14}/> v0.6.6</span>
+            <span><Command size={14}/> v0.6.7</span>
           </footer>
         </div>
       </main>

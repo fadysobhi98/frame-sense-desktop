@@ -446,6 +446,8 @@ fn look_code(look: Option<&str>) -> u8 {
         Some("amber") => 4,
         Some("airy") => 5,
         Some("cinematic") => 6,
+        Some("cool") => 7,
+        Some("punchy") => 8,
         _ => 1, // warm is the default
     }
 }
@@ -570,6 +572,8 @@ async fn suggest_session_tone(folder_path: String) -> Result<ToneSuggestion, Str
             4 => "amber",
             5 => "airy",
             6 => "cinematic",
+            7 => "cool",
+            8 => "punchy",
             _ => "warm",
         };
         Ok(ToneSuggestion {
