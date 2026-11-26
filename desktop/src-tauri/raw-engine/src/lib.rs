@@ -381,6 +381,48 @@ pub extern "C" fn fs_raw_auto_correct_file_v2(
     }
 }
 
+/// True when the prominent faces in this (already corrected) photo have
+/// closed or lowered eyes. Uses the open/closed-eye model on eye crops;
+/// a face counts as closed only when BOTH eyes read closed with high
+/// confidence, and any face at least half the width of the largest one counts.
+pub fn photo_has_closed_eyes(path: &Path, ort_lib: &Path, model_dir: &Path) -> Result<bool, String> {
+    let img = image::open(path).map_err(|e| format!("image open failed: {e}"))?;
+    let img = if img.width().max(img.height()) > 1600 {
+        img.resize(1600, 1600, image::imageops::FilterType::Triangle)
+    } else {
+        img
+    };
+    let faces = retouch::eye_states(&img.to_rgb8(), ort_lib, model_dir)?;
+    let max_w = faces.iter().map(|f| f.0).fold(0.0f32, f32::max);
+    Ok(faces
+        .iter()
+        .any(|(w, l, r)| *w >= 0.5 * max_w && *l < 0.15 && *r < 0.15))
+}
+
+/// C ABI: 1 = closed/lowered eyes found, 0 = fine or no faces, -1 = unknown
+/// (error text via fs_raw_last_error).
+#[no_mangle]
+pub extern "C" fn fs_raw_eyes_closed(
+    src: *const c_char,
+    ort_lib: *const c_char,
+    model_dir: *const c_char,
+) -> i32 {
+    let run = || -> Result<bool, String> {
+        let src = read_c_path(src, "source")?;
+        let ort = read_c_path(ort_lib, "onnxruntime")?;
+        let models = read_c_path(model_dir, "model folder")?;
+        photo_has_closed_eyes(&src, &ort, &models)
+    };
+    match run() {
+        Ok(true) => 1,
+        Ok(false) => 0,
+        Err(e) => {
+            set_last_error(e);
+            -1
+        }
+    }
+}
+
 /// Probe one photo and suggest a session tone. Returns a JSON string
 /// {"look":N,"reason":"..."} (caller frees via fs_raw_free_string), or
 /// null on error (fs_raw_last_error has the message).

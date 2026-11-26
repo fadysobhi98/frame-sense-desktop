@@ -639,6 +639,115 @@ pub fn retouch_image(img: &mut RgbImage, ort_lib: &Path, model_dir: &Path) -> Re
     Ok(done)
 }
 
+/// Per detected face: (face width px, closed-probability of the left eye,
+/// of the right eye) from the Open Model Zoo open-closed-eye-0001 model
+/// (Apache-2.0), applied to eye crops located by the face-mesh landmarks.
+pub fn eye_states(img: &RgbImage, ort_lib: &Path, model_dir: &Path) -> Result<Vec<(f32, f32, f32)>, String> {
+    let gray = image::DynamicImage::ImageRgb8(img.clone()).to_luma8();
+    let (gw, gh) = gray.dimensions();
+    let det_path: PathBuf = model_dir.join("seeta_fd_frontal_v1.0.bin");
+    let faces = detect_faces(&det_path, gray.as_raw(), gw, gh, 40, 3.0)?;
+    let mut out = Vec::new();
+    if faces.is_empty() {
+        return Ok(out);
+    }
+    let env = ort_env(ort_lib)?;
+    let mut mesh = ort::session::Session::builder(env)
+        .map_err(|e| format!("landmark session failed: {e}"))?
+        .with_intra_threads(2)
+        .map_err(|e| format!("landmark session failed: {e}"))?
+        .commit_from_file(&model_dir.join("face_mesh.onnx"))
+        .map_err(|e| format!("landmark model failed to load: {e}"))?;
+    let mut eye = ort::session::Session::builder(env)
+        .map_err(|e| format!("eye session failed: {e}"))?
+        .with_intra_threads(1)
+        .map_err(|e| format!("eye session failed: {e}"))?
+        .commit_from_file(&model_dir.join("open_closed_eye.onnx"))
+        .map_err(|e| format!("eye model failed to load: {e}"))?;
+    for f in &faces {
+        let bb = f.bbox();
+        let side = bb.width().max(bb.height()) as f32 * 1.5;
+        let cx = bb.x() as f32 + bb.width() as f32 / 2.0;
+        let cy = bb.y() as f32 + bb.height() as f32 / 2.0;
+        let x0 = (cx - side / 2.0).max(0.0);
+        let y0 = (cy - side / 2.0).max(0.0);
+        let x1 = (cx + side / 2.0).min(img.width() as f32);
+        let y1 = (cy + side / 2.0).min(img.height() as f32);
+        if x1 <= x0 + 8.0 || y1 <= y0 + 8.0 {
+            continue;
+        }
+        let (cw, ch) = (x1 - x0, y1 - y0);
+        let crop = image::imageops::crop_imm(img, x0 as u32, y0 as u32, cw as u32, ch as u32).to_image();
+        let face192 = image::imageops::resize(&crop, 192, 192, image::imageops::FilterType::Triangle);
+        let mut input = ndarray::Array4::<f32>::zeros((1, 3, 192, 192));
+        for y in 0..192usize {
+            for x in 0..192usize {
+                let p = face192.get_pixel(x as u32, y as u32);
+                for c in 0..3 {
+                    input[[0, c, y, x]] = p[c] as f32 / 255.0;
+                }
+            }
+        }
+        let outs = mesh
+            .run(ort::inputs![ort::value::Tensor::from_array(input).map_err(|e| e.to_string())?])
+            .map_err(|e| format!("landmark inference failed: {e}"))?;
+        let (_s, lm) = outs[0].try_extract_tensor::<f32>().map_err(|e| format!("landmark output unreadable: {e}"))?;
+        let lm: Vec<f32> = lm.to_vec();
+        if lm.len() < 468 * 3 {
+            continue;
+        }
+        if let Ok((_s, sc)) = outs[1].try_extract_tensor::<f32>() {
+            if !sc.is_empty() && sc[0] < 0.5 {
+                continue;
+            }
+        }
+        drop(outs);
+        let pt = |i: usize| -> (f32, f32) { (x0 + lm[i * 3] / 192.0 * cw, y0 + lm[i * 3 + 1] / 192.0 * ch) };
+        let mut pc = [0.0f32; 2];
+        let mut ok = true;
+        for (k, (ia, ib)) in [(33usize, 133usize), (362usize, 263usize)].iter().enumerate() {
+            let (ax, ay) = pt(*ia);
+            let (bx, by) = pt(*ib);
+            let ew = ((ax - bx).powi(2) + (ay - by).powi(2)).sqrt();
+            let (mx, my) = ((ax + bx) / 2.0, (ay + by) / 2.0);
+            let half = (ew * 0.75).max(6.0);
+            let ex0 = (mx - half).max(0.0);
+            let ey0 = (my - half).max(0.0);
+            let ex1 = (mx + half).min(img.width() as f32);
+            let ey1 = (my + half).min(img.height() as f32);
+            if ex1 <= ex0 + 4.0 || ey1 <= ey0 + 4.0 {
+                ok = false;
+                break;
+            }
+            let ec = image::imageops::crop_imm(img, ex0 as u32, ey0 as u32, (ex1 - ex0) as u32, (ey1 - ey0) as u32).to_image();
+            let e32 = image::imageops::resize(&ec, 32, 32, image::imageops::FilterType::Triangle);
+            let mut inp = ndarray::Array4::<f32>::zeros((1, 3, 32, 32));
+            for y in 0..32usize {
+                for x in 0..32usize {
+                    let p = e32.get_pixel(x as u32, y as u32);
+                    // model expects BGR, (v - 127) / 255
+                    inp[[0, 0, y, x]] = (p[2] as f32 - 127.0) / 255.0;
+                    inp[[0, 1, y, x]] = (p[1] as f32 - 127.0) / 255.0;
+                    inp[[0, 2, y, x]] = (p[0] as f32 - 127.0) / 255.0;
+                }
+            }
+            let o = eye
+                .run(ort::inputs![ort::value::Tensor::from_array(inp).map_err(|e| e.to_string())?])
+                .map_err(|e| format!("eye inference failed: {e}"))?;
+            let (_s, v) = o[0].try_extract_tensor::<f32>().map_err(|e| format!("eye output unreadable: {e}"))?;
+            if v.len() < 2 {
+                ok = false;
+                break;
+            }
+            pc[k] = v[1]; // [open, closed]
+        }
+        if ok {
+            out.push((bb.width() as f32, pc[0], pc[1]));
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

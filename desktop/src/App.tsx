@@ -619,7 +619,7 @@ const toggleFullscreen = async () => {
                     <span>Already done (skipped): {acReport.already_done}</span>
                     <span>Failed: {acReport.failed.length}</span>
                     {acReport.processed > 0 && <span>Sorted: {acReport.counts.regular} regular, {acReport.counts.couple} couple, {acReport.counts.group} group, {acReport.counts.rejected} rejected</span>}
-                    {acReport.counts.rejected > 0 && <small>Rejected photos are copies in the Rejected folder for you to review. Nothing is ever deleted and originals are never touched.</small>}
+                    {acReport.counts.rejected > 0 && <small>Rejected photos are copies in the Rejected folder for you to review (clearly blurry, or closed/lowered eyes on the main faces - an automatic check that can miss some blinks or flag a few good photos). Nothing is ever deleted and originals are never touched.</small>}
                     {acReport.total > 0 && <small>{acReport.output_dir}</small>}
                     {acReport.failed.slice(0, 5).map((f) => (
                       <small key={f.file}>{f.file}: {f.error}</small>
@@ -663,7 +663,7 @@ const toggleFullscreen = async () => {
           <footer className="content-footer">
             <span><ShieldCheck size={14}/> Local-first by design</span>
             <span><CircleHelp size={14}/> Everything runs on this PC - originals are never changed</span>
-            <span><Command size={14}/> v0.6.4</span>
+            <span><Command size={14}/> v0.6.5</span>
           </footer>
         </div>
       </main>

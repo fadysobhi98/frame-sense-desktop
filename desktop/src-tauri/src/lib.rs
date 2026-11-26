@@ -55,6 +55,7 @@ type FnAutoCorrectV2 = unsafe extern "C" fn(
 ) -> i32;
 #[allow(clippy::type_complexity)]
 type FnProbeLook = unsafe extern "C" fn(*const std::ffi::c_char) -> *mut std::ffi::c_char;
+type FnEyesClosed = unsafe extern "C" fn(*const std::ffi::c_char, *const std::ffi::c_char, *const std::ffi::c_char) -> i32;
 type FnPreviewJpeg = unsafe extern "C" fn(
     *const std::ffi::c_char,
     u32,
@@ -74,6 +75,7 @@ struct RawEngine {
     auto_correct_v2: Option<FnAutoCorrectV2>,
     preview_jpeg: Option<FnPreviewJpeg>,
     probe_look: Option<FnProbeLook>,
+    eyes_closed: Option<FnEyesClosed>,
     last_error: FnLastError,
     free_string: FnFreeString,
     version: FnVersion,
@@ -144,6 +146,7 @@ fn load_engine() -> Result<RawEngine, String> {
             .ok()
             .map(|s| *s);
         let probe_look = lib.get::<FnProbeLook>(b"fs_raw_probe_look\0").ok().map(|s| *s);
+        let eyes_closed = lib.get::<FnEyesClosed>(b"fs_raw_eyes_closed\0").ok().map(|s| *s);
         Ok(RawEngine {
             _lib: lib,
             auto_correct,
@@ -151,6 +154,7 @@ fn load_engine() -> Result<RawEngine, String> {
             auto_correct_v2,
             preview_jpeg,
             probe_look,
+            eyes_closed,
             last_error,
             free_string,
             version,
@@ -237,6 +241,39 @@ fn face_model_dir() -> Result<PathBuf, String> {
         Ok(dir)
     } else {
         Err("Face retouch is unavailable: the face models are missing next to the app.".to_string())
+    }
+}
+
+/// Sort class for a corrected photo: the blur/face-count classifier, plus
+/// closed or lowered eyes on the main faces -> Rejected (review-only copy).
+/// If the eye model or engine support is missing, only blur applies.
+fn classify_with_eyes(path: &Path) -> classify::SortClass {
+    let base = classify::classify_output(path);
+    if base == classify::SortClass::Rejected {
+        return base;
+    }
+    let check = || -> Option<bool> {
+        let engine = engine().ok()?;
+        let f = engine.eyes_closed?;
+        let dir = engine_dir().ok()?.join("models");
+        if !dir.join("open_closed_eye.onnx").is_file() {
+            return None;
+        }
+        let ort = ort_library_path().ok()?;
+        dir.join("face_mesh.onnx").is_file().then_some(())?;
+        let p = CString::new(path.to_string_lossy().as_bytes()).ok()?;
+        let o = CString::new(ort.to_string_lossy().as_bytes()).ok()?;
+        let m = CString::new(dir.to_string_lossy().as_bytes()).ok()?;
+        match unsafe { f(p.as_ptr(), o.as_ptr(), m.as_ptr()) } {
+            1 => Some(true),
+            0 => Some(false),
+            _ => None,
+        }
+    };
+    if check() == Some(true) {
+        classify::SortClass::Rejected
+    } else {
+        base
     }
 }
 
@@ -391,7 +428,7 @@ async fn auto_correct_folder(
                 let _ = on_progress.send(p);
             },
             &processing_control,
-            &classify::classify_output,
+            &classify_with_eyes,
             &format!("q{quality}:look{look_num}:bw{bw}:rt{retouch}"),
             bw,
         )
@@ -446,7 +483,7 @@ async fn auto_correct_camera(
                 let _ = on_progress.send(p);
             },
             &processing_control,
-            &classify::classify_output,
+            &classify_with_eyes,
             &format!("q{quality}:look{look_num}:bw{bw}:rt{retouch}"),
             bw,
         )
