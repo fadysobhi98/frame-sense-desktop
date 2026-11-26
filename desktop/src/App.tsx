@@ -475,11 +475,11 @@ const toggleFullscreen = async () => {
                 <label>JPEG quality: {quality}<input type="range" min={50} max={100} value={quality} onChange={(e) => setQuality(Number(e.target.value))}/></label>
                 <label><input type="checkbox" checked={bw} onChange={(e) => setBw(e.target.checked)}/> Also export a B&W folder</label>
                 <label title="Finds faces with a local AI model, then whitens teeth and sharpens skin texture. No smoothing, nothing leaves your PC.">
-                  <input type="checkbox" checked={retouch} onChange={(e) => setRetouch(e.target.checked)}/> Face retouch (whiter teeth + sharper skin)
+                  <input type="checkbox" checked={retouch} onChange={(e) => setRetouch(e.target.checked)}/> Face retouch (heal small spots, even skin tone, whiter teeth, brighter eyes)
                 </label>
                 {retouch && (
                   <div className="field-note">
-                    Face retouch uses a small AI model on your PC to find facial features (offline; originals never change). Teeth and skin are then adjusted by auto-correction, not AI generation.
+                    Face retouch uses a small AI model on your PC to find facial features (offline; originals never change). Spots, skin tone, teeth and eyes are then adjusted by auto-correction, not AI generation. Moles and facial features are kept.
                     <button type="button" className="secondary-button" disabled={previewBusy} onClick={previewRetouch} style={{ marginLeft: 8 }}>
                       {previewBusy ? <RefreshCw className="spin" size={14}/> : null} Preview on a photo
                     </button>

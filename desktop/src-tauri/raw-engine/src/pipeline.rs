@@ -202,7 +202,7 @@ pub fn plan_from_lumas(sorted_lumas: &[f32]) -> CorrectionPlan {
 
     // Narrow histogram -> add contrast; already wide -> still some punch.
     let spread = (p99 - p01).clamp(0.0, 1.0);
-    let contrast_mix = (0.38 - spread).clamp(0.06, 0.22);
+    let contrast_mix = (0.40 - spread).clamp(0.08, 0.25);
 
     CorrectionPlan {
         gain,
@@ -254,17 +254,22 @@ pub fn apply_plan(rgb: &mut Rgb32FImage, plan: &CorrectionPlan) {
             r *= 1.0 + plan.skin_warmth;
             b *= 1.0 - plan.skin_warmth;
         }
-        // Warm grade: push toward golden sun. Skin tones are protected so
-        // faces stay natural instead of going neon orange.
+        // Warm grade: push toward golden-orange sun. Skin tones are
+        // protected so faces stay natural instead of going neon orange.
+        // A soft orange split-tone rides the mids/highlights (sunsets,
+        // tungsten venues) and fades out in shadows.
         if plan.warmth > 0.0 {
-            let w = if is_skinish(r, g, b) {
-                plan.warmth * 0.4
-            } else {
-                plan.warmth
-            };
-            r *= 1.0 + 0.13 * w;
-            g *= 1.0 - 0.025 * w;
-            b *= 1.0 - 0.15 * w;
+            let skin = is_skinish(r, g, b);
+            let w = if skin { plan.warmth * 0.45 } else { plan.warmth };
+            r *= 1.0 + 0.16 * w;
+            g *= 1.0 - 0.032 * w;
+            b *= 1.0 - 0.185 * w;
+            // orange split-tone on mids/highlights only
+            let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            let t = smoothstep(((luma - 0.30) / 0.55).clamp(0.0, 1.0)) * w;
+            r += 0.055 * t * (1.0 - r);
+            g += 0.012 * t * (1.0 - g);
+            b -= 0.05 * t * b;
         }
         // Gentle saturation around the pixel's own gray point.
         if plan.saturation > 1.0 {

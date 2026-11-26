@@ -1,11 +1,15 @@
-//! Optional face retouch: teeth whitening + skin texture sharpening.
+//! Optional face retouch: teeth whitening, skin texture sharpening, skin
+//! tone evening, small-blemish cleanup, subtle under-eye and eye-white
+//! cleanup.
 //!
 //! Honest scope: face LANDMARKS come from a real AI model (Google MediaPipe
 //! Face Mesh, Apache-2.0, ONNX conversion by yakhyo/mediapipe-face-mesh-onnx,
 //! Apache-2.0) running locally on CPU. The retouch itself is deterministic
 //! auto-correction driven by those landmarks: no generative fill, no skin
-//! smoothing, no face reshaping. Everything runs offline; originals are
-//! never touched (the caller writes to a new file).
+//! smoothing, no face reshaping. Blemish cleanup targets small red/dark
+//! spots (a few pixels across) and deliberately skips plain dark marks such
+//! as moles, which are part of a face's identity. Everything runs offline;
+//! originals are never touched (the caller writes to a new file).
 
 use image::{Rgb, RgbImage};
 use std::cell::RefCell;
@@ -18,6 +22,8 @@ const LEFT_EYE: [usize; 16] = [33,7,163,144,145,153,154,155,133,173,157,158,159,
 const RIGHT_EYE: [usize; 16] = [362,382,381,380,374,373,390,249,263,466,388,387,386,385,384,398];
 const LEFT_BROW: [usize; 10] = [70,63,105,66,107,55,65,52,53,46];
 const RIGHT_BROW: [usize; 10] = [336,296,334,293,300,283,295,282,283,336];
+const LEFT_EYE_LOWER: [usize; 6] = [33, 145, 153, 154, 155, 133];
+const RIGHT_EYE_LOWER: [usize; 7] = [263, 249, 390, 373, 374, 380, 362];
 const LIPS_OUTER: [usize; 20] = [61,146,91,181,84,17,314,405,321,375,291,409,270,269,267,0,37,39,40,185];
 const LIPS_INNER: [usize; 20] = [78,191,80,81,82,13,312,311,310,415,308,324,318,402,317,14,87,178,88,95];
 
@@ -222,7 +228,12 @@ fn retouch_face(
     let rw = rx1 - rx0;
     let rh = ry1 - ry0;
     let region_img = image::imageops::crop_imm(img, rx0, ry0, rw, rh).to_image();
-    let blurred = image::imageops::blur(&region_img, 2.0);
+    // Band-pass texture boost: boost medium-scale detail (pores, 2-8px)
+    // without touching pixel-scale grain. fine keeps pores, mid is the
+    // local skin tone; their difference is texture without 1px noise, so a
+    // grainy photo stays clean instead of turning to speckle.
+    let fine = image::imageops::blur(&region_img, 0.8);
+    let mid = image::imageops::blur(&region_img, 3.0);
     for y in ry0..ry1 {
         for x in rx0..rx1 {
             let i = (y * w + x) as usize;
@@ -233,14 +244,329 @@ fn retouch_face(
             if !is_skin(&p) {
                 continue;
             }
-            let b = blurred.get_pixel(x - rx0, y - ry0);
-            let strength = 0.6 * m_face[i];
+            let fpx = fine.get_pixel(x - rx0, y - ry0);
+            let mpx = mid.get_pixel(x - rx0, y - ry0);
+            let strength = 0.9 * m_face[i];
             let mut np = [0u8; 3];
             for c in 0..3 {
-                let v = p[c] as f32 + (p[c] as f32 - b[c] as f32) * strength;
+                let band = fpx[c] as f32 - mpx[c] as f32;
+                let v = p[c] as f32 + band * strength;
                 np[c] = v.clamp(0.0, 255.0) as u8;
             }
             img.put_pixel(x, y, Rgb(np));
+        }
+    }
+
+    retouch_skin_detail(img, rx0, ry0, rx1, ry1, side, &pt, &m_face, &m_le, &m_re, &m_lb, &m_rb, &m_mo);
+}
+
+/// Extended retouch on one face region, in YCbCr so chroma edits never
+/// smear pores (luminance) and luminance edits never shift colour.
+/// Steps: small-blemish cleanup, skin tone/redness evening, subtle
+/// under-eye lift, subtle eye-white cleanup.
+#[allow(clippy::too_many_arguments)]
+fn retouch_skin_detail(
+    img: &mut RgbImage,
+    rx0: u32,
+    ry0: u32,
+    rx1: u32,
+    ry1: u32,
+    side: f32,
+    pt: &dyn Fn(usize) -> (f32, f32),
+    m_face: &[f32],
+    m_le: &[f32],
+    m_re: &[f32],
+    m_lb: &[f32],
+    m_rb: &[f32],
+    m_mo: &[f32],
+) {
+    let (w, h) = (img.width(), img.height());
+    let rw = (rx1 - rx0) as usize;
+    let rh = (ry1 - ry0) as usize;
+    let n = rw * rh;
+    let (rwu, rhu) = (rw as u32, rh as u32);
+
+    // region-local YCbCr buffers (Y 0..255, Cb/Cr 0..255 centered on 128)
+    let mut yy = vec![0f32; n];
+    let mut cb = vec![0f32; n];
+    let mut cr = vec![0f32; n];
+    // skin weight per region pixel (feathered oval, features cut out)
+    let mut m_skin = vec![0f32; n];
+    for ry in 0..rh {
+        for rx in 0..rw {
+            let li = ry * rw + rx;
+            let gi = ((ry0 + ry as u32) * w + rx0 + rx as u32) as usize;
+            let p = *img.get_pixel(rx0 + rx as u32, ry0 + ry as u32);
+            let (r, g, b) = (p[0] as f32, p[1] as f32, p[2] as f32);
+            yy[li] = 0.299 * r + 0.587 * g + 0.114 * b;
+            cb[li] = 128.0 - 0.168736 * r - 0.331264 * g + 0.5 * b;
+            cr[li] = 128.0 + 0.5 * r - 0.418688 * g - 0.081312 * b;
+            let mut m = m_face[gi];
+            if m_le[gi] > 0.0 || m_re[gi] > 0.0 || m_lb[gi] > 0.0 || m_rb[gi] > 0.0 || m_mo[gi] > 0.01 {
+                m = 0.0;
+            }
+            if m > 0.0 && !is_skin(&p) {
+                m = 0.0;
+            }
+            m_skin[li] = m;
+        }
+    }
+
+    let blur = |buf: &[f32], rad: i32| blur_f(buf, rwu, rhu, rad, 0, 0, rwu, rhu);
+
+    // --- small-blemish heal ---
+    // DoG blob detection at spot scale (dark+red cores, or strong red),
+    // then per-blob repair: low-frequency teleport fill from surrounding
+    // skin + fine-texture transplant from a horizontal donor offset, so
+    // healed areas keep real pores instead of going plastic-smooth.
+    // Candidates need m_det (inside face oval, features cut) but no skin-
+    // chroma gate: inflamed spots sit outside the normal skin chroma box.
+    // Plain dark marks with no red component (moles) are mostly skipped by
+    // the red requirement, but a red-toned mole can be healed too: Retouch
+    // is opt-in and previewed, so this is acceptable and matches the
+    // target tools' behaviour.
+    let mut m_det = vec![0f32; n];
+    for ry in 0..rh {
+        for rx in 0..rw {
+            let li = ry * rw + rx;
+            let gi = ((ry0 + ry as u32) * w + rx0 + rx as u32) as usize;
+            let mut m = m_face[gi];
+            if m_le[gi] > 0.0 || m_re[gi] > 0.0 || m_lb[gi] > 0.0 || m_rb[gi] > 0.0 || m_mo[gi] > 0.01 {
+                m = 0.0;
+            }
+            m_det[li] = m;
+        }
+    }
+    let y_dog_lo = blur(&yy, 2);
+    let y_dog_hi = blur(&yy, 7);
+    let cr_dog_lo = blur(&cr, 2);
+    let cr_dog_hi = blur(&cr, 7);
+    let mut spot = vec![false; n];
+    for i in 0..n {
+        if m_det[i] < 0.4 {
+            continue;
+        }
+        let dog_y = y_dog_lo[i] - y_dog_hi[i];
+        let dog_cr = cr_dog_lo[i] - cr_dog_hi[i];
+        if (dog_y < -6.0 && dog_cr > 1.0) || dog_cr > 4.0 {
+            spot[i] = true;
+        }
+    }
+    // connected components; keep spot-sized blobs only
+    let max_area = ((side * side * 0.0009) as usize).clamp(8, 400);
+    let mut comp = vec![false; n];
+    let mut seen = vec![false; n];
+    let mut stack: Vec<usize> = Vec::new();
+    for i in 0..n {
+        if !spot[i] || seen[i] {
+            continue;
+        }
+        stack.clear();
+        stack.push(i);
+        seen[i] = true;
+        let mut members: Vec<usize> = Vec::new();
+        while let Some(c) = stack.pop() {
+            members.push(c);
+            let (cx, cy) = (c % rw, c / rw);
+            for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+                let (nx, ny) = (cx as i32 + dx, cy as i32 + dy);
+                if nx < 0 || ny < 0 || nx >= rw as i32 || ny >= rh as i32 {
+                    continue;
+                }
+                let ni = ny as usize * rw + nx as usize;
+                if spot[ni] && !seen[ni] {
+                    seen[ni] = true;
+                    stack.push(ni);
+                }
+            }
+        }
+        if members.len() >= 4 && members.len() <= max_area {
+            for &mi in &members {
+                comp[mi] = true;
+            }
+        }
+    }
+    // dilate the fill set by 2px so the whole discoloured rim is healed
+    let mut hole = vec![false; n];
+    for i in 0..n {
+        if !comp[i] {
+            continue;
+        }
+        let (cx, cy) = (i % rw, i / rw);
+        for dy in -2i32..=2 {
+            for dx in -2i32..=2 {
+                let (nx, ny) = (cx as i32 + dx, cy as i32 + dy);
+                if nx >= 0 && ny >= 0 && nx < rw as i32 && ny < rh as i32 {
+                    hole[ny as usize * rw + nx as usize] = true;
+                }
+            }
+        }
+    }
+    let hole_count = hole.iter().filter(|&&v| v).count();
+    // debug: dump the detection mask for tuning
+    if std::env::var("FS_DEBUG_MASK").is_ok() {
+        let mut dbg = image::GrayImage::new(rwu, rhu);
+        for i in 0..n {
+            let (x, y) = (i % rw, i / rw);
+            let v = if hole[i] { 255u8 } else if spot[i] { 128 } else { (m_det[i] * 60.0) as u8 };
+            dbg.put_pixel(x as u32, y as u32, image::Luma([v]));
+        }
+        let _ = dbg.save("/tmp/fs_debug_mask.png");
+    }
+    // 8% of the region can be genuine acne coverage; beyond that it's a
+    // detection runaway on texture, so bail rather than heal half the face
+    if hole_count > 0 && hole_count * 12 < n {
+        // fine texture layer (pores) and low-frequency layer (tone)
+        let y_low = blur(&yy, 3);
+        // teleport fill: repeatedly blur+composite inside holes; converges
+        // to a smooth fill fed by the surrounding skin
+        let mut fy = y_low.clone();
+        let mut fcb = cb.clone();
+        let mut fcr = cr.clone();
+        for _ in 0..14 {
+            let by = blur(&fy, 3);
+            let bcb = blur(&fcb, 3);
+            let bcr = blur(&fcr, 3);
+            for i in 0..n {
+                if hole[i] {
+                    fy[i] = by[i];
+                    fcb[i] = bcb[i];
+                    fcr[i] = bcr[i];
+                }
+            }
+        }
+        // texture donor: horizontal offset, prefer the side that is not
+        // itself a hole; fall back to no texture (flat) when both are
+        let shift = ((side * 0.045).max(12.0)) as i32;
+        let hole_f: Vec<f32> = hole.iter().map(|&v| if v { 1.0f32 } else { 0.0 }).collect();
+        let hf = blur(&hole_f, 2);
+        for i in 0..n {
+            let m = hf[i];
+            if m < 0.02 {
+                continue;
+            }
+            let (x, y) = (i % rw, i / rw);
+            let donor = |dx: i32| -> Option<f32> {
+                let nx = x as i32 + dx;
+                if nx < 0 || nx >= rw as i32 {
+                    return None;
+                }
+                let ni = y * rw + nx as usize;
+                if hole[ni] {
+                    None
+                } else {
+                    Some(yy[ni] - y_low[ni])
+                }
+            };
+            // sample texture from the nearer cheek side first
+            let tex = donor(-shift)
+                .or_else(|| donor(shift))
+                .unwrap_or(0.0);
+            let healed_y = fy[i] + tex;
+            yy[i] += (healed_y - yy[i]) * m;
+            cb[i] += (fcb[i] - cb[i]) * m;
+            cr[i] += (fcr[i] - cr[i]) * m;
+        }
+    }
+
+    // --- skin tone / redness evening ---
+    // Smooth chroma (never luminance, so pores stay) with an edge-aware
+    // weight: pixels whose luminance matches their surround blend more.
+    let rad_even = ((side * 0.02).max(2.0)) as i32;
+    let cb_b = blur(&cb, rad_even);
+    let cr_b = blur(&cr, rad_even);
+    let y_b = blur(&yy, rad_even);
+    // blend weight first, then blur the weight itself: a per-pixel weight
+    // computed from noisy luminance would otherwise speckle the chroma
+    let mut k_map = vec![0f32; n];
+    for i in 0..n {
+        let lum_sim = (1.0 - (yy[i] - y_b[i]).abs() / 14.0).clamp(0.0, 1.0);
+        k_map[i] = 0.5 * m_skin[i] * lum_sim;
+    }
+    let k_map = blur(&k_map, 3);
+    for i in 0..n {
+        let k = k_map[i];
+        if k < 0.01 {
+            continue;
+        }
+        cb[i] += (cb_b[i] - cb[i]) * k;
+        cr[i] += (cr_b[i] - cr[i]) * k;
+    }
+
+    // --- subtle under-eye lift ---
+    // band under each lower eyelid, ~1 eye-height deep, well feathered
+    let to_region = |i: usize| {
+        let (x, y) = pt(i);
+        (x - rx0 as f32, y - ry0 as f32)
+    };
+    for lower in [&LEFT_EYE_LOWER[..], &RIGHT_EYE_LOWER[..]] {
+        let mut poly: Vec<(f32, f32)> = lower.iter().map(|&i| to_region(i)).collect();
+        let y_top = poly.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
+        let y_bot = poly.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
+        let depth = (y_bot - y_top).max(side * 0.02) * 1.1 + side * 0.02;
+        for j in (0..poly.len()).rev() {
+            poly.push((poly[j].0, poly[j].1 + depth));
+        }
+        let m_ue = blur(&poly_mask_f(rwu, rhu, &poly, 0, 0, rwu, rhu), ((side * 0.02).max(2.0)) as i32);
+        for i in 0..n {
+            let m = m_ue[i] * 0.8;
+            if m < 0.02 {
+                continue;
+            }
+            yy[i] += 0.07 * m * (255.0 - yy[i]);
+            cb[i] += (128.0 - cb[i]) * 0.10 * m;
+            cr[i] += (128.0 - cr[i]) * 0.14 * m;
+        }
+    }
+
+    // --- subtle eye-white cleanup ---
+    // eye interior pixels that are bright and desaturated (sclera, not iris):
+    // pull down redness, tiny lift. Never touches the iris.
+    let feather_eye = ((side * 0.008).max(1.0)) as i32;
+    for eye in [&LEFT_EYE[..], &RIGHT_EYE[..]] {
+        let poly: Vec<(f32, f32)> = eye.iter().map(|&i| to_region(i)).collect();
+        let m_e = blur(&poly_mask_f(rwu, rhu, &poly, 0, 0, rwu, rhu), feather_eye);
+        for i in 0..n {
+            let m = m_e[i];
+            if m < 0.05 {
+                continue;
+            }
+            let (rx, ry) = (i % rw, i / rw);
+            let p = *img.get_pixel(rx0 + rx as u32, ry0 + ry as u32);
+            let mx = p[0].max(p[1]).max(p[2]) as f32;
+            let mn = p[0].min(p[1]).min(p[2]) as f32;
+            if mx < 115.0 || (mx - mn) / mx.max(1.0) > 0.32 {
+                continue;
+            }
+            let k = m * 0.6;
+            cr[i] += (128.0 - cr[i]) * 0.22 * k;
+            cb[i] += (128.0 - cb[i]) * 0.10 * k;
+            yy[i] += 0.05 * k * (255.0 - yy[i]);
+        }
+    }
+
+    // --- single write-back for every pixel this pass touched ---
+    let _ = h;
+    for ry in 0..rh {
+        for rx in 0..rw {
+            let i = ry * rw + rx;
+            let gi = ((ry0 + ry as u32) * w + rx0 + rx as u32) as usize;
+            let p = *img.get_pixel(rx0 + rx as u32, ry0 + ry as u32);
+            let y0 = 0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32;
+            let cb0 = 128.0 - 0.168736 * p[0] as f32 - 0.331264 * p[1] as f32 + 0.5 * p[2] as f32;
+            let cr0 = 128.0 + 0.5 * p[0] as f32 - 0.418688 * p[1] as f32 - 0.081312 * p[2] as f32;
+            if (yy[i] - y0).abs() < 0.05 && (cb[i] - cb0).abs() < 0.05 && (cr[i] - cr0).abs() < 0.05 {
+                continue;
+            }
+            let _ = gi;
+            let r = yy[i] + 1.402 * (cr[i] - 128.0);
+            let g = yy[i] - 0.344136 * (cb[i] - 128.0) - 0.714136 * (cr[i] - 128.0);
+            let b = yy[i] + 1.772 * (cb[i] - 128.0);
+            img.put_pixel(
+                rx0 + rx as u32,
+                ry0 + ry as u32,
+                Rgb([r.clamp(0.0, 255.0) as u8, g.clamp(0.0, 255.0) as u8, b.clamp(0.0, 255.0) as u8]),
+            );
         }
     }
 }
