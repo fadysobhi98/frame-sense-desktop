@@ -238,6 +238,7 @@ async fn auto_correct_folder(
     output_dir: Option<String>,
     quality: Option<u8>,
     look: Option<String>,
+    bw: Option<bool>,
     on_progress: tauri::ipc::Channel<core::AutoCorrectProgress>,
 ) -> Result<core::AutoCorrectReport, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -245,6 +246,7 @@ async fn auto_correct_folder(
         reset_processing_control();
         let quality = quality.unwrap_or(core::DEFAULT_JPEG_QUALITY);
         let look_num = look_code(look.as_deref());
+        let bw = bw.unwrap_or(true);
         let correct = move |src: &Path, dst: &Path, q: u8| {
             engine_correct_look(src, dst, q, look_num)
         };
@@ -258,7 +260,8 @@ async fn auto_correct_folder(
             },
             &processing_control,
             &classify::classify_output,
-            &format!("q{quality}:look{look_num}"),
+            &format!("q{quality}:look{look_num}:bw{bw}"),
+            bw,
         )
     })
     .await
@@ -281,6 +284,7 @@ async fn auto_correct_camera(
     output_dir: Option<String>,
     quality: Option<u8>,
     look: Option<String>,
+    bw: Option<bool>,
     on_progress: tauri::ipc::Channel<core::AutoCorrectProgress>,
 ) -> Result<core::AutoCorrectReport, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -289,6 +293,7 @@ async fn auto_correct_camera(
         reset_processing_control();
         let quality = quality.unwrap_or(core::DEFAULT_JPEG_QUALITY);
         let look_num = look_code(look.as_deref());
+        let bw = bw.unwrap_or(true);
         let correct = move |src: &Path, dst: &Path, q: u8| {
             engine_correct_look(src, dst, q, look_num)
         };
@@ -303,7 +308,8 @@ async fn auto_correct_camera(
             },
             &processing_control,
             &classify::classify_output,
-            &format!("q{quality}:look{look_num}"),
+            &format!("q{quality}:look{look_num}:bw{bw}"),
+            bw,
         )
     })
     .await

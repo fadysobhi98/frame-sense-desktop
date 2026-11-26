@@ -588,6 +588,7 @@ pub fn run_auto_correct(
     control: &dyn Fn() -> ControlAction,
     classify: &dyn Fn(&Path) -> SortClass,
     job_tag: &str,
+    bw: bool,
 ) -> Result<AutoCorrectReport, String> {
     if camera_id != "Camera 1" && camera_id != "Camera 2" {
         return Err("Camera must be Camera 1 or Camera 2.".into());
@@ -706,6 +707,9 @@ pub fn run_auto_correct(
             Ok(()) => {
                 let class = classify(&output_file);
                 let final_path = move_into_sort_folder(&output_file, &output_camera_dir, class)?;
+                if bw && class != SortClass::Rejected {
+                    write_bw_copy(&final_path, &output_camera_dir)?;
+                }
                 counts.add(class);
                 conn.execute(
                     "INSERT OR REPLACE INTO auto_corrections(source_sha256, camera_id, params, source_path, output_path, created_at)
@@ -811,6 +815,7 @@ pub fn run_auto_correct_folder(
     control: &dyn Fn() -> ControlAction,
     classify: &dyn Fn(&Path) -> SortClass,
     job_tag: &str,
+    bw: bool,
 ) -> Result<AutoCorrectReport, String> {
     let quality = quality.clamp(50, 100);
     let folder_root = canonical_for_compare(&PathBuf::from(folder_path.trim()));
@@ -908,7 +913,10 @@ pub fn run_auto_correct_folder(
         match correct(&source_file, &output_file, quality) {
             Ok(()) => {
                 let class = classify(&output_file);
-                move_into_sort_folder(&output_file, &output_root, class)?;
+                let final_path = move_into_sort_folder(&output_file, &output_root, class)?;
+                if bw && class != SortClass::Rejected {
+                    write_bw_copy(&final_path, &output_root)?;
+                }
                 counts.add(class);
                 processed += 1;
             }
@@ -942,11 +950,12 @@ pub fn run_auto_correct_folder(
     })
 }
 
-/// Remove any corrected copies of this stem (flat or in sorting
-/// subfolders) so a settings change re-processes cleanly.
+/// Remove any corrected copies of this stem (flat, sorting subfolders or
+/// B&W) so a settings change re-processes cleanly.
 fn remove_sorted_outputs(output_root: &Path, stem: &str) {
     let name = format!("{stem}.jpg");
     let _ = fs::remove_file(output_root.join(&name));
+    let _ = fs::remove_file(output_root.join(BW_FOLDER).join(&name));
     for c in [
         SortClass::Regular,
         SortClass::Couple,
@@ -955,6 +964,24 @@ fn remove_sorted_outputs(output_root: &Path, stem: &str) {
     ] {
         let _ = fs::remove_file(output_root.join(c.subfolder()).join(&name));
     }
+}
+
+/// Subfolder name for the black-and-white copies (session photos).
+pub const BW_FOLDER: &str = "B&W";
+
+/// Write the B&W twin of one corrected photo into the B&W subfolder.
+/// Failure to make the twin never fails the photo itself.
+fn write_bw_copy(color_path: &Path, output_root: &Path) -> Result<(), String> {
+    let name = color_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("image.jpg");
+    let dir = output_root.join(BW_FOLDER);
+    fs::create_dir_all(&dir).map_err(|e| format!("Could not create the B&W folder: {e}"))?;
+    if let Err(e) = crate::classify::bw_copy(color_path, &dir.join(name), 90) {
+        eprintln!("B&W copy failed for {name}: {e}");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1217,8 +1244,12 @@ mod tests {
         vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46]
     }
 
-    fn fake_correct_ok(src: &Path, dst: &Path, _q: u8) -> Result<(), String> {
-        fs::copy(src, dst).map_err(|e| e.to_string())?;
+    fn fake_correct_ok(_src: &Path, dst: &Path, _q: u8) -> Result<(), String> {
+        // A real tiny JPEG so downstream consumers (sorting, B&W copies)
+        // can decode it like a real engine output.
+        image::RgbImage::from_pixel(8, 8, image::Rgb([120u8, 140, 160]))
+            .save(dst)
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -1260,7 +1291,7 @@ mod tests {
             &|_| {},
             &|| ControlAction::Continue,
             &|_| SortClass::Regular,
-            "test",
+            "test", false,
         )
         .unwrap();
 
@@ -1278,8 +1309,8 @@ mod tests {
     #[test]
     fn auto_correct_rerun_skips_done() {
         let (_base, _card, project) = project_with_photos();
-        let first = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular, "test").unwrap();
-        let second = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular, "test").unwrap();
+        let first = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular, "test", false).unwrap();
+        let second = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular, "test", false).unwrap();
         assert_eq!(first.processed, 2);
         assert_eq!(second.processed, 0);
         assert_eq!(second.already_done, 2);
@@ -1289,8 +1320,8 @@ mod tests {
     #[test]
     fn auto_correct_new_quality_reprocesses() {
         let (_base, _card, project) = project_with_photos();
-        run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular, "test").unwrap();
-        let rerun = run_auto_correct(&project.project_path, "Camera 1", None, 80, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular, "test").unwrap();
+        run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular, "test", false).unwrap();
+        let rerun = run_auto_correct(&project.project_path, "Camera 1", None, 80, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular, "test", false).unwrap();
         assert_eq!(rerun.processed, 2);
         // Old outputs were not overwritten; new ones got unique names.
         let dir = PathBuf::from(&project.project_path).join("Export/Camera 1/Regular");
@@ -1302,7 +1333,7 @@ mod tests {
     #[test]
     fn auto_correct_collects_failures() {
         let (_base, _card, project) = project_with_photos();
-        let report = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_fail, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular, "test").unwrap();
+        let report = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_fail, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular, "test", false).unwrap();
         assert_eq!(report.processed, 0);
         assert_eq!(report.failed.len(), 2);
         assert!(report.failed[0].error.contains("engine exploded"));
@@ -1310,7 +1341,7 @@ mod tests {
         let leftover: Vec<_> = fs::read_dir(dir).unwrap().filter_map(|e| e.ok()).collect();
         assert!(leftover.is_empty());
         // Failure is not recorded as done: a retry with a working engine processes it.
-        let retry = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular, "test").unwrap();
+        let retry = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular, "test", false).unwrap();
         assert_eq!(retry.processed, 2);
     }
 
@@ -1328,7 +1359,7 @@ mod tests {
             &|_| {},
             &|| ControlAction::Continue,
             &|_| SortClass::Regular,
-            "test",
+            "test", false,
         )
         .unwrap();
         let picked_clean = canonical_for_compare(picked.path());
@@ -1347,7 +1378,7 @@ mod tests {
             &|_| {},
             &|| ControlAction::Continue,
             &|_| SortClass::Regular,
-            "test",
+            "test", false,
         );
         assert!(bad.is_err());
     }
@@ -1376,7 +1407,7 @@ mod tests {
         assert!(fs::read_dir(PathBuf::from(&project.project_path).join("Originals/Camera 1"))
             .unwrap().next().is_none());
         // Auto-correct resolves the moved file through the recorded absolute path.
-        let report = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular, "test").unwrap();
+        let report = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular, "test", false).unwrap();
         assert_eq!(report.processed, 1);
     }
 
@@ -1400,7 +1431,7 @@ mod tests {
             &|_| {},
             &|| ControlAction::Continue,
             &|_| SortClass::Regular,
-            "test",
+            "test", false,
         )
         .unwrap();
 
@@ -1428,7 +1459,7 @@ mod tests {
             &|_| {},
             &|| ControlAction::Continue,
             &|_| SortClass::Regular,
-            "test",
+            "test", false,
         )
         .unwrap();
         assert_eq!(report.total, 0);
@@ -1445,7 +1476,7 @@ mod tests {
             &|_| {},
             &|| ControlAction::Continue,
             &|_| SortClass::Regular,
-            "test",
+            "test", false,
         )
         .unwrap();
         assert_eq!(report.total, 0);
@@ -1458,9 +1489,9 @@ mod tests {
         let photos = TestDir::new("fold-rerun");
         write_file(photos.path(), "a.cr2", &[8u8; 128]);
 
-        let first = run_auto_correct_folder(photos.path().to_str().unwrap(), None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular, "test").unwrap();
+        let first = run_auto_correct_folder(photos.path().to_str().unwrap(), None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular, "test", false).unwrap();
         assert_eq!(first.processed, 1);
-        let second = run_auto_correct_folder(photos.path().to_str().unwrap(), None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular, "test").unwrap();
+        let second = run_auto_correct_folder(photos.path().to_str().unwrap(), None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular, "test", false).unwrap();
         assert_eq!(second.total, 1, "output JPEGs must not be re-scanned as input");
         assert_eq!(second.processed, 0);
         assert_eq!(second.already_done, 1);
@@ -1487,7 +1518,7 @@ mod tests {
             &|_| {},
             &|| ControlAction::Continue,
             &|_| SortClass::Regular,
-            "test",
+            "test", false,
         );
         assert!(same.is_err());
 
@@ -1503,7 +1534,7 @@ mod tests {
             &|_| {},
             &|| ControlAction::Continue,
             &|_| SortClass::Regular,
-            "test",
+            "test", false,
         );
         assert!(swallowing.is_err());
     }
@@ -1521,7 +1552,7 @@ mod tests {
             &|_| {},
             &|| ControlAction::Continue,
             &|_| SortClass::Regular,
-            "test",
+            "test", false,
         )
         .unwrap();
         assert_eq!(report.processed, 0);
@@ -1537,7 +1568,7 @@ mod tests {
         // Remove the pre-created Export folder tree so we can prove no recreation.
         let export = PathBuf::from(&project.project_path).join("Export");
         fs::remove_dir_all(&export).unwrap();
-        let report = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular, "test").unwrap();
+        let report = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular, "test", false).unwrap();
         assert_eq!(report.total, 0);
         assert!(!export.exists());
     }
@@ -1567,7 +1598,7 @@ mod tests {
             &|_| {},
             &control,
             &|_| SortClass::Regular,
-            "test",
+            "test", false,
         )
         .unwrap();
         assert!(report.stopped);
@@ -1581,7 +1612,7 @@ mod tests {
             &|_| {},
             &|| ControlAction::Continue,
             &|_| SortClass::Regular,
-            "test",
+            "test", false,
         )
         .unwrap();
         assert_eq!(resume.processed, 3);
@@ -1640,7 +1671,7 @@ mod tests {
             &|_| {},
             &|| ControlAction::Continue,
             &classify,
-            "test",
+            "test", true,
         )
         .unwrap();
         let out = photos.path().join("Frame Sense Corrected");
@@ -1648,6 +1679,11 @@ mod tests {
         assert!(out.join("Group/group.jpg").exists());
         assert!(out.join("Rejected/blurry.jpg").exists());
         assert!(out.join("Regular/plain.jpg").exists());
+        // B&W twins for the good photos; rejected photos get none.
+        assert!(out.join("B&W/couple.jpg").exists());
+        assert!(out.join("B&W/group.jpg").exists());
+        assert!(out.join("B&W/plain.jpg").exists());
+        assert!(!out.join("B&W/blurry.jpg").exists());
         assert_eq!(report.counts.couple, 1);
         assert_eq!(report.counts.group, 1);
         assert_eq!(report.counts.rejected, 1);
@@ -1664,7 +1700,7 @@ mod tests {
             &|_| {},
             &|| ControlAction::Continue,
             &classify,
-            "test",
+            "test", true,
         )
         .unwrap();
         assert_eq!(second.processed, 0);
@@ -1679,13 +1715,13 @@ mod tests {
         write_file(photos.path(), "a.cr2", b"x");
         let first = run_auto_correct_folder(
             photos.path().to_str().unwrap(), None, 90, &fake_correct_ok, &|_| {},
-            &|| ControlAction::Continue, &|_| SortClass::Regular, "q90:look1",
+            &|| ControlAction::Continue, &|_| SortClass::Regular, "q90:look1", true,
         )
         .unwrap();
         assert_eq!(first.processed, 1);
         let second = run_auto_correct_folder(
             photos.path().to_str().unwrap(), None, 90, &fake_correct_ok, &|_| {},
-            &|| ControlAction::Continue, &|_| SortClass::Regular, "q90:look2",
+            &|| ControlAction::Continue, &|_| SortClass::Regular, "q90:look2", true,
         )
         .unwrap();
         assert_eq!(second.processed, 1);

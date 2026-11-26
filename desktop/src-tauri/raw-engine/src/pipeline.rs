@@ -26,7 +26,7 @@ impl Look {
     fn warmth(self) -> f32 {
         match self {
             Look::Natural => 0.15,
-            Look::Warm => 0.55,
+            Look::Warm => 0.7,
             Look::Golden => 1.0,
         }
     }
@@ -182,8 +182,8 @@ pub fn plan_from_lumas(sorted_lumas: &[f32]) -> CorrectionPlan {
         GAIN_MAX
     };
 
-    // Small black-point subtraction so shadows keep depth.
-    let black_point = (p01 * gain * 0.5).clamp(0.0, 0.05);
+    // Black-point subtraction so shadows keep depth and photos look punchy.
+    let black_point = (p01 * gain * 0.9).clamp(0.01, 0.09);
 
     // Dull images (no real whites even after gain) get a gentle gamma lift;
     // otherwise leave tone mapping to gain + highlight shoulder.
@@ -200,9 +200,9 @@ pub fn plan_from_lumas(sorted_lumas: &[f32]) -> CorrectionPlan {
     let clipped = (p99 * gain - 0.98).max(0.0);
     let highlight_compress = (clipped * 1.5).clamp(0.0, 0.35);
 
-    // Narrow histogram -> add some contrast; already wide -> almost none.
+    // Narrow histogram -> add contrast; already wide -> still some punch.
     let spread = (p99 - p01).clamp(0.0, 1.0);
-    let contrast_mix = (0.30 - spread).clamp(0.02, 0.16);
+    let contrast_mix = (0.38 - spread).clamp(0.06, 0.22);
 
     CorrectionPlan {
         gain,
@@ -258,13 +258,13 @@ pub fn apply_plan(rgb: &mut Rgb32FImage, plan: &CorrectionPlan) {
         // faces stay natural instead of going neon orange.
         if plan.warmth > 0.0 {
             let w = if is_skinish(r, g, b) {
-                plan.warmth * 0.45
+                plan.warmth * 0.4
             } else {
                 plan.warmth
             };
-            r *= 1.0 + 0.10 * w;
-            g *= 1.0 - 0.02 * w;
-            b *= 1.0 - 0.12 * w;
+            r *= 1.0 + 0.13 * w;
+            g *= 1.0 - 0.025 * w;
+            b *= 1.0 - 0.15 * w;
         }
         // Gentle saturation around the pixel's own gray point.
         if plan.saturation > 1.0 {

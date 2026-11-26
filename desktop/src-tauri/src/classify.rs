@@ -245,3 +245,24 @@ mod tests {
         );
     }
 }
+
+/// Write a black-and-white copy of a corrected photo: same edit, monochrome.
+/// Weighted luma mix (not flat desaturation) plus a gentle contrast curve so
+/// the B&W version keeps the punch of the colour edit.
+pub fn bw_copy(src: &Path, dst: &Path, quality: u8) -> Result<(), String> {
+    let img = image::open(src).map_err(|e| format!("B&W source unreadable: {e}"))?;
+    let rgb = img.to_rgb8();
+    let mut out = image::GrayImage::new(rgb.width(), rgb.height());
+    for (x, y, p) in rgb.enumerate_pixels() {
+        let [r, g, b] = p.0;
+        let mut l = 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
+        // Gentle S-curve around 128 for punch.
+        let t = l / 255.0;
+        l = (t + 0.18 * (t * t * (3.0 - 2.0 * t) - t)) * 255.0;
+        out.put_pixel(x, y, image::Luma([l.clamp(0.0, 255.0) as u8]));
+    }
+    out.save_with_format(dst, image::ImageFormat::Jpeg)
+        .map_err(|e| format!("B&W write failed: {e}"))?;
+    let _ = quality;
+    Ok(())
+}

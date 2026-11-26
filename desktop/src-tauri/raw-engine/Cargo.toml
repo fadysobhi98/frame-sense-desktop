@@ -1,6 +1,6 @@
 [package]
 name = "framesense-raw"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 description = "Frame Sense RAW decode + Smart Basic auto-correction engine"
 license = "LGPL-2.1-only"
