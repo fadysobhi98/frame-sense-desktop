@@ -583,6 +583,12 @@ pub fn retouch_image(img: &mut RgbImage, ort_lib: &Path, model_dir: &Path) -> Re
     if faces.is_empty() {
         return Ok(0);
     }
+    // Retouch only photos where a face is the subject (portrait / couple).
+    // Hall, venue, decor and crowd shots have no large face: skip them.
+    let biggest = faces.iter().map(|f| f.bbox().width()).max().unwrap_or(0);
+    if (biggest as f32) < 0.07 * gw as f32 {
+        return Ok(0);
+    }
 
     let env = ort_env(ort_lib)?;
     let model_path = model_dir.join("face_mesh.onnx");

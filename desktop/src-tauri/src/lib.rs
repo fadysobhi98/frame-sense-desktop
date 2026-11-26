@@ -64,6 +64,7 @@ type FnPreviewJpeg = unsafe extern "C" fn(
     *const std::ffi::c_char,
     *const std::ffi::c_char,
 ) -> *mut std::ffi::c_char;
+type FnSetAdjust = unsafe extern "C" fn(f32, f32, f32, f32, f32);
 type FnLastError = unsafe extern "C" fn() -> *mut std::ffi::c_char;
 type FnFreeString = unsafe extern "C" fn(*mut std::ffi::c_char);
 type FnVersion = unsafe extern "C" fn() -> *mut std::ffi::c_char;
@@ -76,6 +77,7 @@ struct RawEngine {
     preview_jpeg: Option<FnPreviewJpeg>,
     probe_look: Option<FnProbeLook>,
     eyes_closed: Option<FnEyesClosed>,
+    set_adjust: Option<FnSetAdjust>,
     last_error: FnLastError,
     free_string: FnFreeString,
     version: FnVersion,
@@ -147,8 +149,10 @@ fn load_engine() -> Result<RawEngine, String> {
             .map(|s| *s);
         let probe_look = lib.get::<FnProbeLook>(b"fs_raw_probe_look\0").ok().map(|s| *s);
         let eyes_closed = lib.get::<FnEyesClosed>(b"fs_raw_eyes_closed\0").ok().map(|s| *s);
+        let set_adjust = lib.get::<FnSetAdjust>(b"fs_raw_set_adjust\0").ok().map(|s| *s);
         Ok(RawEngine {
             _lib: lib,
+            set_adjust,
             auto_correct,
             auto_correct_look,
             auto_correct_v2,
@@ -398,6 +402,16 @@ fn set_processing_control(command: String) -> Result<(), String> {
 
 // Heavy work runs on a blocking thread, never the UI thread: the window
 // stays responsive and Pause/Stop work while hundreds of photos process.
+/// Optional sliders (each -1..1): contrast, brightness, warmth, fade, saturation.
+#[command]
+fn set_adjust(contrast: f32, brightness: f32, warmth: f32, fade: f32, saturation: f32) -> Result<(), String> {
+    let e = engine()?;
+    if let Some(f) = e.set_adjust {
+        unsafe { f(contrast, brightness, warmth, fade, saturation) };
+    }
+    Ok(())
+}
+
 #[command]
 async fn auto_correct_folder(
     folder_path: String,
@@ -449,6 +463,7 @@ fn look_code(look: Option<&str>) -> u8 {
         Some("cool") => 7,
         Some("punchy") => 8,
         Some("warm") => 1,
+        Some(x) if x.starts_with("style") => 10 + x[5..].parse::<u8>().unwrap_or(0).min(23),
         _ => 9, // auto (per-photo) is the default
     }
 }
@@ -656,6 +671,7 @@ pub fn run() {
             import_camera_files,
             auto_correct_camera,
             auto_correct_folder,
+            set_adjust,
             set_processing_control,
             retouch_preview,
             suggest_session_tone,

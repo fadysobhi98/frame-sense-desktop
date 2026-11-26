@@ -100,8 +100,8 @@ function App() {
   const [quality, setQuality] = useState(90);
   const [look, setLook] = useState("auto");
   const TONES: { id: string; label: string; hint: string }[] = [
-    { id: "auto", label: "Auto (each photo on its own)", hint: "Default. Every photo is analysed and corrected separately: exposure, light, colour, skin. No preset look." },
-    { id: "natural", label: "Natural", hint: "True-to-life colours, no warm tint" },
+    { id: "auto", label: "Auto correction + colouring", hint: "Default. Every photo is analysed on its own: exposure, light, white balance, skin tone, warm colouring. Rule-based, no preset look." },
+    { id: "natural", label: "Auto correction only", hint: "Same per-photo correction, no colouring or warm tint" },
     { id: "warm", label: "Warm Golden", hint: "Gentle golden warmth, same for every photo" },
     { id: "golden", label: "Golden+", hint: "Strong orange-gold glow" },
     { id: "peach", label: "Peach-Gold", hint: "Soft pink-peach glow, creamy highlights" },
@@ -110,7 +110,35 @@ function App() {
     { id: "cinematic", label: "Matte Film", hint: "Flat faded matte, muted colours" },
     { id: "cool", label: "Cool Clean", hint: "Cooler blue-ish whites, crisp" },
     { id: "punchy", label: "High Contrast", hint: "Strong contrast and rich colour" },
+    { id: "style0", label: "Vintage Warm", hint: "Optional vintage style (colour maths, not AI)" },
+    { id: "style1", label: "Vintage Sepia", hint: "Optional vintage style (colour maths, not AI)" },
+    { id: "style2", label: "Vintage Cool", hint: "Optional vintage style (colour maths, not AI)" },
+    { id: "style3", label: "Vintage Teal-Green", hint: "Optional vintage style (colour maths, not AI)" },
+    { id: "style4", label: "Vintage Rose", hint: "Optional vintage style (colour maths, not AI)" },
+    { id: "style5", label: "Vintage Amber", hint: "Optional vintage style (colour maths, not AI)" },
+    { id: "style6", label: "Retro 70s", hint: "Optional vintage style (colour maths, not AI)" },
+    { id: "style7", label: "Polaroid", hint: "Optional vintage style (colour maths, not AI)" },
+    { id: "style8", label: "Kodak Gold", hint: "Optional vintage style (colour maths, not AI)" },
+    { id: "style9", label: "Old Film", hint: "Optional vintage style (colour maths, not AI)" },
+    { id: "style10", label: "Washed Vintage", hint: "Optional vintage style (colour maths, not AI)" },
+    { id: "style11", label: "Vintage Peach", hint: "Optional vintage style (colour maths, not AI)" },
+    { id: "style12", label: "Faded Warm", hint: "Optional faded style (colour maths, not AI)" },
+    { id: "style13", label: "Faded Cool", hint: "Optional faded style (colour maths, not AI)" },
+    { id: "style14", label: "Faded Pink", hint: "Optional faded style (colour maths, not AI)" },
+    { id: "style15", label: "Faded Teal-Green", hint: "Optional faded style (colour maths, not AI)" },
+    { id: "style16", label: "Faded Lavender", hint: "Optional faded style (colour maths, not AI)" },
+    { id: "style17", label: "Faded Peach", hint: "Optional faded style (colour maths, not AI)" },
+    { id: "style18", label: "Faded Sage", hint: "Optional faded style (colour maths, not AI)" },
+    { id: "style19", label: "Faded Sand", hint: "Optional faded style (colour maths, not AI)" },
+    { id: "style20", label: "Faded Blue", hint: "Optional faded style (colour maths, not AI)" },
+    { id: "style21", label: "Soft Pastel", hint: "Optional faded style (colour maths, not AI)" },
+    { id: "style22", label: "Dusty Rose", hint: "Optional faded style (colour maths, not AI)" },
+    { id: "style23", label: "Sunset Fade", hint: "Optional faded style (colour maths, not AI)" },
   ];
+  const [adj, setAdj] = useState({ contrast: 0, brightness: 0, warmth: 0, fade: 0, saturation: 0 });
+  useEffect(() => {
+    invoke("set_adjust", { contrast: adj.contrast, brightness: adj.brightness, warmth: adj.warmth, fade: adj.fade, saturation: adj.saturation }).catch(() => {});
+  }, [adj]);
   const [bw, setBw] = useState(true);
   const [toneSuggestion, setToneSuggestion] = useState<{ tone: string; reason: string; probed: number } | null>(null);
   const [toneSuggestBusy, setToneSuggestBusy] = useState(false);
@@ -524,7 +552,7 @@ const toggleFullscreen = async () => {
                     </button>
                   </div>
                 )}
-                <label>Session tone: <select value={look} onChange={(e) => setLook(e.target.value)}>
+                <label>Session tone (optional, Auto is the default): <select value={look} onChange={(e) => setLook(e.target.value)}>
                   {TONES.map((t) => <option key={t.id} value={t.id}>{t.label}{t.id === "auto" ? " (default)" : ""}</option>)}
                 </select></label>
                 <div className="field-note">
@@ -533,6 +561,15 @@ const toggleFullscreen = async () => {
                     {previewBusy ? <RefreshCw className="spin" size={14}/> : null} Preview on a photo
                   </button>
                 </div>
+                <div className="field-note">Adjust the chosen tone (applies to every photo in this run; 0 = off):</div>
+                {([["contrast", "Contrast"], ["brightness", "Brightness (open / darken)"], ["warmth", "Warmth"], ["fade", "Fade"], ["saturation", "Saturation"]] as const).map(([k, label]) => (
+                  <label key={k}>{label}: {adj[k].toFixed(2)}
+                    <input type="range" min={-1} max={1} step={0.05} value={adj[k]} onChange={(e) => setAdj({ ...adj, [k]: Number(e.target.value) })}/>
+                  </label>
+                ))}
+                {preview?.path && (
+                  <button type="button" className="secondary-button" disabled={previewBusy} onClick={() => previewTone(look)}>Update preview with sliders</button>
+                )}
                 <label>JPEG quality: {quality}<input type="range" min={50} max={100} value={quality} onChange={(e) => setQuality(Number(e.target.value))}/></label>
                 <label><input type="checkbox" checked={bw} onChange={(e) => setBw(e.target.checked)}/> Also export a B&W folder</label>
                 <label title="Finds faces with a local AI model, then whitens teeth and sharpens skin texture. No smoothing, nothing leaves your PC.">
@@ -540,7 +577,7 @@ const toggleFullscreen = async () => {
                 </label>
                 {retouch && (
                   <div className="field-note">
-                    Face retouch uses a small AI model on your PC to find facial features (offline; originals never change). Spots, skin tone, teeth and eyes are then adjusted by auto-correction, not AI generation. Moles and facial features are kept. Automatic noise reduction is a classical algorithm (wavelet filter), not AI; it keeps detail and skin texture.
+                    Face retouch runs only on portrait and couple photos where a face is large; hall, venue and crowd photos are skipped. It uses a small AI model on your PC to find facial features (offline; originals never change). Spots, skin tone, teeth and eyes are then adjusted by auto-correction, not AI generation. Moles and facial features are kept. Automatic noise reduction is a classical algorithm (wavelet filter), not AI; it keeps detail and skin texture.
                   </div>
                 )}
                 {preview && (
@@ -565,7 +602,7 @@ const toggleFullscreen = async () => {
                     <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
                       <figure style={{ margin: 0, flex: 1 }}>
                         <img src={`data:image/jpeg;base64,${preview.before}`} alt="Before" style={{ width: "100%", borderRadius: 6 }} />
-                        <figcaption className="field-note">Before (Natural tone)</figcaption>
+                        <figcaption className="field-note">Before (Auto correction only)</figcaption>
                       </figure>
                       <figure style={{ margin: 0, flex: 1 }}>
                         <img src={`data:image/jpeg;base64,${preview.after}`} alt="After" style={{ width: "100%", borderRadius: 6 }} />
@@ -666,7 +703,7 @@ const toggleFullscreen = async () => {
           <footer className="content-footer">
             <span><ShieldCheck size={14}/> Local-first by design</span>
             <span><CircleHelp size={14}/> Everything runs on this PC - originals are never changed</span>
-            <span><Command size={14}/> v0.6.8</span>
+            <span><Command size={14}/> v0.6.9</span>
           </footer>
         </div>
       </main>

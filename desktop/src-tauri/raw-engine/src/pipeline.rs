@@ -23,6 +23,8 @@ pub enum Look {
     Punchy,
     /// Per-photo automatic correction, no preset grade.
     Auto,
+    /// Optional vintage/faded style from the STYLES table (code 10+index).
+    Style(u8),
 }
 
 /// Grade parameters behind a session tone.
@@ -59,6 +61,7 @@ impl Look {
             7 => Look::Cool,
             8 => Look::Punchy,
             9 => Look::Auto,
+            v if v >= 10 && ((v - 10) as usize) < STYLES.len() => Look::Style(v - 10),
             _ => Look::Warm,
         }
     }
@@ -98,6 +101,7 @@ impl Look {
             Look::BrightAiry => LookParams { warmth: 0.5, split: 0.6, black_floor: 0.04, cream: 0.8, contrast_bias: -0.05, ..BASE },
             Look::Cinematic => LookParams { warmth: 0.4, split: 0.8, black_floor: 0.10, cream: 1.0, contrast_bias: -0.06, ..BASE },
             Look::Cool => LookParams { warmth: 0.0, ..BASE },
+            Look::Style(_) => LookParams { warmth: 0.5, ..BASE },
             Look::Auto => LookParams { warmth: 1.0, saturation_boost: 0.03, ..BASE },
             Look::Punchy => LookParams { warmth: 0.5, saturation_boost: 0.25, contrast_bias: 0.15, ..BASE },
         }
@@ -661,6 +665,7 @@ fn tone_finish(rgb: &mut Rgb32FImage, look: Look) {
                 g = f(g);
                 b = f(b);
             }
+            Look::Style(i) => style_finish(&mut r, &mut g, &mut b, &STYLES[i as usize]),
             Look::BrightAiry => {
                 let m = (1.0 - (l - 0.5).abs() * 2.0).clamp(0.0, 1.0);
                 let lift = 1.0 + 0.12 * m;
@@ -672,6 +677,116 @@ fn tone_finish(rgb: &mut Rgb32FImage, look: Look) {
             _ => {}
         }
         px.0 = [r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0)];
+    }
+}
+
+/// Optional vintage / faded styles. Plain colour maths, not AI.
+/// Fields: warm, green-magenta shift, shadow tint rgb, highlight tint rgb,
+/// fade (lifted blacks), saturation, contrast, brightness.
+pub struct Style {
+    pub warm: f32,
+    pub gm: f32,
+    pub sh: [f32; 3],
+    pub hi: [f32; 3],
+    pub fade: f32,
+    pub sat: f32,
+    pub con: f32,
+    pub bri: f32,
+}
+
+const fn st(warm: f32, gm: f32, sh: [f32; 3], hi: [f32; 3], fade: f32, sat: f32, con: f32, bri: f32) -> Style {
+    Style { warm, gm, sh, hi, fade, sat, con, bri }
+}
+
+pub static STYLES: [Style; 24] = [
+    // Vintage (0..11)
+    st(0.35, 0.0, [0.02, 0.00, -0.02], [0.03, 0.02, -0.03], 0.30, 0.85, 0.10, 0.0),   // 0 Vintage Warm
+    st(0.55, 0.02, [0.03, 0.01, -0.03], [0.04, 0.02, -0.05], 0.35, 0.45, 0.10, -0.02), // 1 Sepia
+    st(-0.35, 0.0, [-0.02, 0.01, 0.04], [0.01, 0.01, 0.00], 0.30, 0.85, 0.10, 0.0),    // 2 Vintage Cool
+    st(-0.10, 0.06, [-0.03, 0.03, 0.04], [0.03, 0.03, -0.02], 0.30, 0.90, 0.12, 0.0),  // 3 Vintage Teal-Green
+    st(0.10, -0.06, [0.03, -0.01, 0.02], [0.04, 0.01, 0.01], 0.30, 0.88, 0.05, 0.02),  // 4 Vintage Rose
+    st(0.70, 0.01, [0.04, 0.01, -0.04], [0.05, 0.03, -0.05], 0.25, 1.00, 0.14, 0.0),   // 5 Vintage Amber
+    st(0.60, 0.02, [0.03, 0.00, -0.02], [0.06, 0.04, -0.06], 0.20, 1.15, 0.12, 0.02),  // 6 Retro 70s
+    st(0.30, 0.05, [-0.02, 0.03, 0.01], [0.05, 0.03, -0.03], 0.35, 0.90, 0.10, 0.0),   // 7 Polaroid
+    st(0.50, 0.01, [0.01, 0.00, -0.02], [0.05, 0.04, -0.04], 0.12, 1.12, 0.18, 0.0),   // 8 Kodak Gold
+    st(0.10, 0.0, [0.00, 0.00, 0.00], [0.01, 0.01, 0.00], 0.40, 0.60, 0.05, 0.0),      // 9 Old Film
+    st(0.20, 0.0, [0.02, 0.02, 0.02], [0.02, 0.01, -0.01], 0.45, 0.75, -0.05, 0.03),   // 10 Washed Vintage
+    st(0.40, -0.03, [0.03, 0.00, 0.00], [0.04, 0.02, -0.02], 0.28, 0.92, 0.10, 0.0),   // 11 Vintage Peach
+    // Faded (12..23)
+    st(0.35, 0.0, [0.03, 0.02, 0.01], [0.02, 0.01, -0.02], 0.40, 0.80, -0.08, 0.03),   // 12 Faded Warm
+    st(-0.30, 0.0, [0.00, 0.02, 0.04], [0.00, 0.01, 0.02], 0.40, 0.80, -0.08, 0.03),   // 13 Faded Cool
+    st(0.10, -0.07, [0.04, 0.00, 0.03], [0.03, 0.01, 0.01], 0.40, 0.80, -0.08, 0.04),  // 14 Faded Pink
+    st(-0.10, 0.08, [-0.01, 0.04, 0.03], [0.00, 0.03, 0.00], 0.40, 0.80, -0.06, 0.02), // 15 Faded Teal-Green
+    st(-0.10, -0.06, [0.03, 0.00, 0.05], [0.02, 0.01, 0.03], 0.42, 0.75, -0.08, 0.04), // 16 Faded Lavender
+    st(0.45, -0.02, [0.04, 0.02, 0.02], [0.03, 0.02, 0.00], 0.40, 0.82, -0.08, 0.05),  // 17 Faded Peach
+    st(0.00, 0.07, [0.01, 0.03, 0.01], [0.01, 0.02, 0.00], 0.42, 0.70, -0.06, 0.03),   // 18 Faded Sage
+    st(0.30, 0.01, [0.03, 0.02, 0.00], [0.02, 0.02, 0.00], 0.45, 0.60, -0.06, 0.04),   // 19 Faded Sand
+    st(-0.45, 0.0, [-0.02, 0.01, 0.05], [0.00, 0.01, 0.03], 0.35, 0.55, 0.00, 0.0),    // 20 Faded Blue
+    st(0.05, -0.03, [0.03, 0.02, 0.04], [0.03, 0.03, 0.03], 0.35, 0.65, -0.12, 0.08),  // 21 Soft Pastel
+    st(0.20, -0.08, [0.05, 0.00, 0.01], [0.03, 0.01, 0.00], 0.38, 0.72, -0.04, 0.0),   // 22 Dusty Rose
+    st(0.65, -0.04, [0.04, 0.00, 0.03], [0.06, 0.03, -0.04], 0.32, 1.00, 0.02, 0.02),  // 23 Sunset Fade
+];
+
+fn style_finish(r: &mut f32, g: &mut f32, b: &mut f32, s: &Style) {
+    let l = 0.2126 * *r + 0.7152 * *g + 0.0722 * *b;
+    let y = l;
+    // saturation
+    *r = y + (*r - y) * s.sat;
+    *g = y + (*g - y) * s.sat;
+    *b = y + (*b - y) * s.sat;
+    // warmth and green/magenta
+    *r *= 1.0 + 0.18 * s.warm;
+    *b *= 1.0 - 0.21 * s.warm;
+    *g *= 1.0 + 0.15 * s.gm;
+    *r *= 1.0 - 0.05 * s.gm;
+    *b *= 1.0 - 0.05 * s.gm;
+    // split tone
+    let sh = (1.0 - l).clamp(0.0, 1.0).powi(2);
+    let hi = l.clamp(0.0, 1.0).powi(2);
+    let t = [&mut *r, &mut *g, &mut *b];
+    for (c, v) in t.into_iter().enumerate() {
+        *v += 1.8 * (s.sh[c] * sh + s.hi[c] * hi);
+        *v = 0.5 + (*v - 0.5) * (1.0 + s.con) + s.bri * 0.2;
+        // fade: lift blacks, soften whites
+        *v = s.fade * 0.16 + *v * (1.0 - s.fade * 0.16 - s.fade * 0.06);
+    }
+}
+
+static ADJUST: std::sync::Mutex<[f32; 5]> = std::sync::Mutex::new([0.0; 5]);
+
+/// User sliders (each -1..1): contrast, brightness, warmth, fade, saturation.
+pub fn set_adjust(v: [f32; 5]) {
+    if let Ok(mut a) = ADJUST.lock() {
+        *a = [v[0].clamp(-1.0, 1.0), v[1].clamp(-1.0, 1.0), v[2].clamp(-1.0, 1.0), v[3].clamp(-1.0, 1.0), v[4].clamp(-1.0, 1.0)];
+    }
+}
+
+fn adjust_finish(rgb: &mut Rgb32FImage) {
+    let a = ADJUST.lock().map(|g| *g).unwrap_or([0.0; 5]);
+    if a.iter().all(|v| v.abs() < 1e-4) {
+        return;
+    }
+    let [con, bri, warm, fade, sat] = a;
+    for px in rgb.pixels_mut() {
+        let [mut r, mut g, mut b] = px.0;
+        // brightness in a gamma-like way so it never clips hard
+        let gm = (-bri * 0.6).exp2();
+        r = r.max(0.0).powf(gm);
+        g = g.max(0.0).powf(gm);
+        b = b.max(0.0).powf(gm);
+        r *= 1.0 + 0.12 * warm;
+        b *= 1.0 - 0.14 * warm;
+        let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        let k = 1.0 + sat * 0.8;
+        r = y + (r - y) * k;
+        g = y + (g - y) * k;
+        b = y + (b - y) * k;
+        let c = |v: f32| {
+            let v = 0.5 + (v - 0.5) * (1.0 + 0.5 * con);
+            let f = fade.max(0.0);
+            (f * 0.14 + v * (1.0 - f * 0.20)).clamp(0.0, 1.0)
+        };
+        px.0 = [c(r), c(g), c(b)];
     }
 }
 
@@ -687,6 +802,7 @@ pub fn auto_correct(image: &DynamicImage, look: Look) -> DynamicImage {
     let plan = plan_for_image(&rgb, look);
     apply_plan(&mut rgb, &plan);
     tone_finish(&mut rgb, look);
+    adjust_finish(&mut rgb);
     DynamicImage::ImageRgb32F(rgb)
 }
 

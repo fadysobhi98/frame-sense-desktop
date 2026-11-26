@@ -458,6 +458,7 @@ pub extern "C" fn fs_raw_probe_look(src: *const c_char) -> *mut c_char {
             pipeline::Look::Cool => 7,
             pipeline::Look::Punchy => 8,
             pipeline::Look::Auto => 9,
+            pipeline::Look::Style(_) => 1,
         };
         Ok(format!("{{\"look\":{code},\"reason\":\"{reason}\"}}"))
     };
@@ -595,4 +596,11 @@ mod tests {
             assert!(!is_raw_extension(ext));
         }
     }
+}
+
+/// Optional user sliders (contrast, brightness, warmth, fade, saturation),
+/// each -1..1, applied to every photo processed afterwards.
+#[no_mangle]
+pub extern "C" fn fs_raw_set_adjust(contrast: f32, brightness: f32, warmth: f32, fade: f32, saturation: f32) {
+    pipeline::set_adjust([contrast, brightness, warmth, fade, saturation]);
 }
