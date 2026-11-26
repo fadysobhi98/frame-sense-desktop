@@ -26,7 +26,7 @@ jobs:
         working-directory: desktop
         run: npm ci
 
-      - name: Test and build the RAW engine DLL (must exist before the app build: it is a bundled resource)
+      - name: "Test and build the RAW engine DLL (must exist before the app build - it is a bundled resource)"
         working-directory: desktop/src-tauri/raw-engine
         run: |
           cargo test
