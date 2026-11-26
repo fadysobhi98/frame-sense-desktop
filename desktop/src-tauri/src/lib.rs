@@ -157,7 +157,6 @@ fn load_engine() -> Result<RawEngine, String> {
             _lib: lib,
             set_adjust,
             set_ai_look,
-            set_ai_look,
             auto_correct,
             auto_correct_look,
             auto_correct_v2,
