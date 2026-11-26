@@ -375,9 +375,6 @@ pub extern "C" fn fs_raw_auto_correct_file_v2(
     }
 }
 
-/// Base64 JPEG preview (developed with look, optional retouch), small.
-/// Free with fs_raw_free_string. Null on failure (see fs_raw_last_error).
-#[no_mangle]
 /// Probe one photo and suggest a session tone. Returns a JSON string
 /// {"look":N,"reason":"..."} (caller frees via fs_raw_free_string), or
 /// null on error (fs_raw_last_error has the message).
@@ -424,6 +421,9 @@ pub extern "C" fn fs_raw_probe_look(src: *const c_char) -> *mut c_char {
     }
 }
 
+/// Base64 JPEG preview (developed with look, optional retouch), small.
+/// Free with fs_raw_free_string. Null on failure (see fs_raw_last_error).
+#[no_mangle]
 pub extern "C" fn fs_raw_preview_jpeg(
     src: *const c_char,
     max_dim: u32,

@@ -663,7 +663,7 @@ const toggleFullscreen = async () => {
           <footer className="content-footer">
             <span><ShieldCheck size={14}/> Local-first by design</span>
             <span><CircleHelp size={14}/> Everything runs on this PC - originals are never changed</span>
-            <span><Command size={14}/> v0.6.2</span>
+            <span><Command size={14}/> v0.6.3</span>
           </footer>
         </div>
       </main>
