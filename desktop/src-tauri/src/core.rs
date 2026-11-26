@@ -83,6 +83,7 @@ fn create_project_schema(
             original_name TEXT NOT NULL,
             stored_name TEXT NOT NULL,
             relative_path TEXT NOT NULL,
+            absolute_path TEXT NOT NULL DEFAULT '',
             sha256 TEXT NOT NULL,
             size_bytes INTEGER NOT NULL,
             imported_at TEXT NOT NULL,
@@ -107,6 +108,60 @@ fn create_project_schema(
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Open a project database and apply any pending schema migrations.
+fn open_project_db(project_root: &Path) -> Result<Connection, String> {
+    let db_path = project_root.join("Project Data").join("project.sqlite");
+    if !db_path.is_file() {
+        return Err("Project database is missing.".into());
+    }
+    let conn =
+        Connection::open(&db_path).map_err(|e| format!("Could not open project database: {e}"))?;
+
+    // Migration (pre-0.2 projects): absolute_path on imported_files.
+    if conn
+        .prepare("SELECT absolute_path FROM imported_files LIMIT 0")
+        .is_err()
+    {
+        conn.execute_batch(
+            "ALTER TABLE imported_files ADD COLUMN absolute_path TEXT NOT NULL DEFAULT ''",
+        )
+        .map_err(|e| format!("Could not migrate project database: {e}"))?;
+        let mut stmt = conn
+            .prepare("SELECT id, relative_path FROM imported_files")
+            .map_err(|e| e.to_string())?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .collect();
+        for (id, rel) in rows {
+            let abs = project_root.join(&rel).to_string_lossy().to_string();
+            conn.execute(
+                "UPDATE imported_files SET absolute_path = ?1 WHERE id = ?2",
+                params![abs, id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS auto_corrections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_sha256 TEXT NOT NULL,
+            camera_id TEXT NOT NULL,
+            params TEXT NOT NULL,
+            source_path TEXT NOT NULL,
+            output_path TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(source_sha256, params)
+        );
+        ",
+    )
+    .map_err(|e| format!("Could not initialize auto-correction log: {e}"))?;
+    Ok(conn)
 }
 
 pub fn create_project(
@@ -186,7 +241,8 @@ pub fn create_project(
     })
 }
 
-fn is_supported_photo(path: &Path) -> bool {
+/// Photo extensions the app accepts (RAW + everyday raster).
+pub fn is_supported_photo(path: &Path) -> bool {
     let allowed = [
         // Everyday image formats
         "jpg", "jpeg", "png", "webp", "heic", "heif",
@@ -278,6 +334,7 @@ pub fn import_camera_files(
     project_path: &str,
     source_path: &str,
     camera_id: &str,
+    destination_dir: Option<&str>,
 ) -> Result<ImportResult, String> {
     if camera_id != "Camera 1" && camera_id != "Camera 2" {
         return Err("Camera must be Camera 1 or Camera 2.".into());
@@ -299,19 +356,37 @@ pub fn import_camera_files(
         );
     }
 
-    let destination_dir = project_root.join("Originals").join(camera_id);
+    // Destination: the project's Originals/<camera> folder by default, or a
+    // folder the user picked themselves (keeping the Originals/<camera>
+    // structure underneath it).
+    let destination_dir = match destination_dir.map(str::trim).filter(|d| !d.is_empty()) {
+        None => project_root.join("Originals").join(camera_id),
+        Some(picked) => {
+            let picked_root = PathBuf::from(picked)
+                .canonicalize()
+                .map_err(|e| format!("Destination folder not found: {e}"))?;
+            if !picked_root.is_dir() {
+                return Err("The destination must be a folder.".into());
+            }
+            if picked_root.starts_with(&source_root) || source_root.starts_with(&picked_root) {
+                return Err(
+                    "The destination folder and card/source folder must be separate, non-nested folders."
+                        .into(),
+                );
+            }
+            let dir = picked_root.join("Originals").join(camera_id);
+            fs::create_dir_all(&dir)
+                .map_err(|e| format!("Could not create the destination camera folder: {e}"))?;
+            dir
+        }
+    };
     if !destination_dir.is_dir() {
         return Err(
             "This does not look like a Frame Sense project. Originals/Camera folder is missing."
                 .into(),
         );
     }
-    let db_path = project_root.join("Project Data").join("project.sqlite");
-    if !db_path.is_file() {
-        return Err("Project database is missing.".into());
-    }
-    let conn =
-        Connection::open(&db_path).map_err(|e| format!("Could not open project database: {e}"))?;
+    let conn = open_project_db(&project_root)?;
     conn.execute(
         "INSERT INTO camera_sources(camera_id, source_path, added_at) VALUES(?1, ?2, ?3)",
         params![
@@ -380,8 +455,8 @@ pub fn import_camera_files(
             .len() as i64;
 
         conn.execute(
-            "INSERT INTO imported_files(id, camera_id, source_path, original_name, stored_name, relative_path, sha256, size_bytes, imported_at)
-             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO imported_files(id, camera_id, source_path, original_name, stored_name, relative_path, absolute_path, sha256, size_bytes, imported_at)
+             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 Uuid::new_v4().to_string(),
                 camera_id,
@@ -389,6 +464,7 @@ pub fn import_camera_files(
                 original_name,
                 destination_file.file_name().and_then(|n| n.to_str()).unwrap_or("image"),
                 relative,
+                destination_file.to_string_lossy().to_string(),
                 source_hash,
                 size,
                 now_string()
@@ -403,6 +479,195 @@ pub fn import_camera_files(
         skipped_unsupported,
         camera_id: camera_id.to_string(),
         destination: destination_dir.to_string_lossy().to_string(),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2: Smart Basic auto-correction
+// ---------------------------------------------------------------------------
+
+pub const DEFAULT_JPEG_QUALITY: u8 = 90;
+pub const SMART_BASIC_PARAMS_VERSION: &str = "smart-basic-v1";
+
+#[derive(Serialize, Clone)]
+pub struct AutoCorrectProgress {
+    pub current: usize,
+    pub total: usize,
+    pub file: String,
+    pub processed: usize,
+    pub failed: usize,
+}
+
+#[derive(Serialize, Debug)]
+pub struct AutoCorrectFailure {
+    pub file: String,
+    pub error: String,
+}
+
+#[derive(Serialize)]
+pub struct AutoCorrectReport {
+    pub total: usize,
+    pub processed: usize,
+    pub already_done: usize,
+    pub failed: Vec<AutoCorrectFailure>,
+    pub output_dir: String,
+}
+
+/// Run Smart Basic auto-correction over one camera lane of a project.
+///
+/// `correct` performs one file (decode + correct + JPEG encode). In the app
+/// this calls framesense_raw.dll; tests inject the engine directly.
+/// Originals are never modified: outputs go to a separate folder as new
+/// 8-bit JPEGs, and finished work is recorded so re-runs skip it.
+pub fn run_auto_correct(
+    project_path: &str,
+    camera_id: &str,
+    output_dir: Option<&str>,
+    quality: u8,
+    correct: &dyn Fn(&Path, &Path, u8) -> Result<(), String>,
+    progress: &dyn Fn(AutoCorrectProgress),
+) -> Result<AutoCorrectReport, String> {
+    if camera_id != "Camera 1" && camera_id != "Camera 2" {
+        return Err("Camera must be Camera 1 or Camera 2.".into());
+    }
+    let quality = quality.clamp(50, 100);
+    let project_root = PathBuf::from(project_path.trim())
+        .canonicalize()
+        .map_err(|e| format!("Project folder not found: {e}"))?;
+    let conn = open_project_db(&project_root)?;
+
+    let output_root = match output_dir.map(str::trim).filter(|d| !d.is_empty()) {
+        Some(picked) => {
+            let root = PathBuf::from(picked);
+            fs::create_dir_all(&root)
+                .map_err(|e| format!("Could not create the output folder: {e}"))?;
+            root.canonicalize()
+                .map_err(|e| format!("Output folder not usable: {e}"))?
+        }
+        None => project_root.join("Export"),
+    };
+    if output_root.starts_with(project_root.join("Originals")) {
+        return Err("The output folder must not be inside Originals.".into());
+    }
+    let output_camera_dir = output_root.join(camera_id);
+    fs::create_dir_all(&output_camera_dir)
+        .map_err(|e| format!("Could not create the output camera folder: {e}"))?;
+
+    let params_key = format!("{SMART_BASIC_PARAMS_VERSION}:q{quality}");
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, original_name, relative_path, absolute_path, sha256
+             FROM imported_files WHERE camera_id = ?1 ORDER BY imported_at, rowid",
+        )
+        .map_err(|e| e.to_string())?;
+    let files: Vec<(String, String, String, String, String)> = stmt
+        .query_map(params![camera_id], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(Result::ok)
+        .collect();
+
+    let total = files.len();
+    let mut processed = 0usize;
+    let mut already_done = 0usize;
+    let mut failed: Vec<AutoCorrectFailure> = Vec::new();
+
+    for (index, (_id, original_name, relative_path, absolute_path, sha256)) in
+        files.into_iter().enumerate()
+    {
+        progress(AutoCorrectProgress {
+            current: index + 1,
+            total,
+            file: original_name.clone(),
+            processed,
+            failed: failed.len(),
+        });
+
+        let source_file = {
+            let abs = PathBuf::from(&absolute_path);
+            if !absolute_path.is_empty() && abs.is_file() {
+                abs
+            } else {
+                project_root.join(&relative_path)
+            }
+        };
+        if !source_file.is_file() {
+            failed.push(AutoCorrectFailure {
+                file: original_name.clone(),
+                error: "original file not found on disk".to_string(),
+            });
+            continue;
+        }
+
+        let done: Option<String> = conn
+            .query_row(
+                "SELECT output_path FROM auto_corrections WHERE source_sha256 = ?1 AND params = ?2",
+                params![sha256, params_key],
+                |row| row.get(0),
+            )
+            .ok();
+        if let Some(existing) = done {
+            if Path::new(&existing).is_file() {
+                already_done += 1;
+                continue;
+            }
+        }
+
+        let stem = Path::new(&original_name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("image");
+        let output_file = unique_destination(&output_camera_dir, &format!("{stem}.jpg"));
+
+        match correct(&source_file, &output_file, quality) {
+            Ok(()) => {
+                conn.execute(
+                    "INSERT OR REPLACE INTO auto_corrections(source_sha256, camera_id, params, source_path, output_path, created_at)
+                     VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        sha256,
+                        camera_id,
+                        params_key,
+                        source_file.to_string_lossy().to_string(),
+                        output_file.to_string_lossy().to_string(),
+                        now_string()
+                    ],
+                )
+                .map_err(|e| e.to_string())?;
+                processed += 1;
+            }
+            Err(e) => {
+                let _ = fs::remove_file(&output_file);
+                failed.push(AutoCorrectFailure {
+                    file: original_name.clone(),
+                    error: e,
+                });
+            }
+        }
+    }
+
+    progress(AutoCorrectProgress {
+        current: total,
+        total,
+        file: String::new(),
+        processed,
+        failed: failed.len(),
+    });
+
+    Ok(AutoCorrectReport {
+        total,
+        processed,
+        already_done,
+        failed,
+        output_dir: output_camera_dir.to_string_lossy().to_string(),
     })
 }
 
@@ -525,6 +790,7 @@ mod tests {
             &project.project_path,
             card.path().to_str().unwrap(),
             "Camera 1",
+            None,
         )
         .unwrap();
 
@@ -560,8 +826,8 @@ mod tests {
         let project = make_project(&base);
         write_file(card.path(), "A.jpg", b"same bytes");
 
-        let first = import_camera_files(&project.project_path, card.path().to_str().unwrap(), "Camera 1").unwrap();
-        let second = import_camera_files(&project.project_path, card.path().to_str().unwrap(), "Camera 1").unwrap();
+        let first = import_camera_files(&project.project_path, card.path().to_str().unwrap(), "Camera 1", None).unwrap();
+        let second = import_camera_files(&project.project_path, card.path().to_str().unwrap(), "Camera 1", None).unwrap();
         assert_eq!(first.imported, 1);
         assert_eq!(second.imported, 0);
         assert_eq!(second.duplicates, 1);
@@ -575,8 +841,8 @@ mod tests {
         let project = make_project(&base);
         write_file(card.path(), "A.jpg", b"same bytes");
 
-        let cam1 = import_camera_files(&project.project_path, card.path().to_str().unwrap(), "Camera 1").unwrap();
-        let cam2 = import_camera_files(&project.project_path, card.path().to_str().unwrap(), "Camera 2").unwrap();
+        let cam1 = import_camera_files(&project.project_path, card.path().to_str().unwrap(), "Camera 1", None).unwrap();
+        let cam2 = import_camera_files(&project.project_path, card.path().to_str().unwrap(), "Camera 2", None).unwrap();
         assert_eq!(cam1.imported, 1);
         assert_eq!(cam2.imported, 1);
         assert!(PathBuf::from(&project.project_path).join("Originals/Camera 1/A.jpg").exists());
@@ -592,7 +858,7 @@ mod tests {
         write_file(card.path(), "slot1/IMG_0001.jpg", b"first photo bytes");
         write_file(card.path(), "slot2/IMG_0001.jpg", b"different photo bytes!");
 
-        let result = import_camera_files(&project.project_path, card.path().to_str().unwrap(), "Camera 1").unwrap();
+        let result = import_camera_files(&project.project_path, card.path().to_str().unwrap(), "Camera 1", None).unwrap();
         assert_eq!(result.imported, 2);
         let dest = PathBuf::from(&project.project_path).join("Originals/Camera 1");
         let original = fs::read(dest.join("IMG_0001.jpg")).unwrap();
@@ -622,6 +888,7 @@ mod tests {
             &project.project_path,
             card.path().to_str().unwrap(),
             "Camera 1",
+            None,
         )
         .unwrap();
         assert_eq!(result.imported, extensions.len());
@@ -638,7 +905,7 @@ mod tests {
         write_file(card.path(), "clip.mp4", b"not a photo either");
         write_file(card.path(), "real.cr2", b"fake raw bytes");
 
-        let result = import_camera_files(&project.project_path, card.path().to_str().unwrap(), "Camera 1").unwrap();
+        let result = import_camera_files(&project.project_path, card.path().to_str().unwrap(), "Camera 1", None).unwrap();
         assert_eq!(result.imported, 1);
         assert_eq!(result.skipped_unsupported, 2);
         assert!(!PathBuf::from(&project.project_path).join("Originals/Camera 1/notes.txt").exists());
@@ -651,11 +918,167 @@ mod tests {
         let project = make_project(&base);
         // Source inside the project.
         let inside = PathBuf::from(&project.project_path).join("Mobile Edits");
-        let result = import_camera_files(&project.project_path, inside.to_str().unwrap(), "Camera 1");
+        let result = import_camera_files(&project.project_path, inside.to_str().unwrap(), "Camera 1", None);
         assert!(result.is_err());
         // Project inside the source.
-        let result = import_camera_files(&project.project_path, base.path().to_str().unwrap(), "Camera 1");
+        let result = import_camera_files(&project.project_path, base.path().to_str().unwrap(), "Camera 1", None);
         assert!(result.is_err());
+    }
+
+
+    fn fake_jpeg() -> Vec<u8> {
+        // Minimal valid JPEG header bytes; the fake corrector only copies them.
+        vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46]
+    }
+
+    fn fake_correct_ok(src: &Path, dst: &Path, _q: u8) -> Result<(), String> {
+        fs::copy(src, dst).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn fake_correct_fail(_src: &Path, _dst: &Path, _q: u8) -> Result<(), String> {
+        Err("engine exploded".to_string())
+    }
+
+    fn project_with_photos() -> (TestDir, TestDir, CreateProjectResult) {
+        let base = TestDir::new("ac-base");
+        let card = TestDir::new("ac-card");
+        let project = make_project(&base);
+        write_file(card.path(), "DCIM/IMG_0001.cr2", &[7u8; 1024]);
+        write_file(card.path(), "DCIM/IMG_0002.cr2", &[9u8; 2048]);
+        import_camera_files(
+            &project.project_path,
+            card.path().to_str().unwrap(),
+            "Camera 1",
+            None,
+        )
+        .unwrap();
+        (base, card, project)
+    }
+
+    /// Auto-correction writes new JPEGs into Export/<camera>; originals untouched.
+    #[test]
+    fn auto_correct_processes_and_preserves_originals() {
+        let (_base, card, project) = project_with_photos();
+        let src = card.path().join("DCIM/IMG_0001.cr2");
+        let src_hash_before = sha256_file(&src).unwrap();
+        let original = PathBuf::from(&project.project_path).join("Originals/Camera 1/IMG_0001.cr2");
+        let orig_hash_before = sha256_file(&original).unwrap();
+
+        let report = run_auto_correct(
+            &project.project_path,
+            "Camera 1",
+            None,
+            90,
+            &fake_correct_ok,
+            &|_| {},
+        )
+        .unwrap();
+
+        assert_eq!(report.total, 2);
+        assert_eq!(report.processed, 2);
+        assert!(report.failed.is_empty());
+        assert!(PathBuf::from(&report.output_dir).join("IMG_0001.jpg").exists());
+        assert!(PathBuf::from(&report.output_dir).join("IMG_0002.jpg").exists());
+        // Originals untouched.
+        assert_eq!(src_hash_before, sha256_file(&src).unwrap());
+        assert_eq!(orig_hash_before, sha256_file(&original).unwrap());
+    }
+
+    /// Re-running with the same settings skips finished work.
+    #[test]
+    fn auto_correct_rerun_skips_done() {
+        let (_base, _card, project) = project_with_photos();
+        let first = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}).unwrap();
+        let second = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}).unwrap();
+        assert_eq!(first.processed, 2);
+        assert_eq!(second.processed, 0);
+        assert_eq!(second.already_done, 2);
+    }
+
+    /// A different quality setting is a new job, not a duplicate.
+    #[test]
+    fn auto_correct_new_quality_reprocesses() {
+        let (_base, _card, project) = project_with_photos();
+        run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}).unwrap();
+        let rerun = run_auto_correct(&project.project_path, "Camera 1", None, 80, &fake_correct_ok, &|_| {}).unwrap();
+        assert_eq!(rerun.processed, 2);
+        // Old outputs were not overwritten; new ones got unique names.
+        let dir = PathBuf::from(&project.project_path).join("Export/Camera 1");
+        let jpgs: Vec<_> = fs::read_dir(dir).unwrap().filter_map(|e| e.ok()).collect();
+        assert_eq!(jpgs.len(), 4);
+    }
+
+    /// Engine failures are collected per file and leave no output behind.
+    #[test]
+    fn auto_correct_collects_failures() {
+        let (_base, _card, project) = project_with_photos();
+        let report = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_fail, &|_| {}).unwrap();
+        assert_eq!(report.processed, 0);
+        assert_eq!(report.failed.len(), 2);
+        assert!(report.failed[0].error.contains("engine exploded"));
+        let dir = PathBuf::from(&project.project_path).join("Export/Camera 1");
+        let leftover: Vec<_> = fs::read_dir(dir).unwrap().filter_map(|e| e.ok()).collect();
+        assert!(leftover.is_empty());
+        // Failure is not recorded as done: a retry with a working engine processes it.
+        let retry = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}).unwrap();
+        assert_eq!(retry.processed, 2);
+    }
+
+    /// Output folder can be picked freely; it must not sit inside Originals.
+    #[test]
+    fn auto_correct_custom_output_and_originals_guard() {
+        let (_base, _card, project) = project_with_photos();
+        let picked = TestDir::new("ac-output");
+        let report = run_auto_correct(
+            &project.project_path,
+            "Camera 1",
+            Some(picked.path().to_str().unwrap()),
+            90,
+            &fake_correct_ok,
+            &|_| {},
+        )
+        .unwrap();
+        assert!(report.output_dir.starts_with(picked.path().to_str().unwrap()));
+        assert!(PathBuf::from(&report.output_dir).join("IMG_0001.jpg").exists());
+
+        let bad = run_auto_correct(
+            &project.project_path,
+            "Camera 1",
+            Some(PathBuf::from(&project.project_path).join("Originals").to_str().unwrap()),
+            90,
+            &fake_correct_ok,
+            &|_| {},
+        );
+        assert!(bad.is_err());
+    }
+
+    /// Import into a user-picked destination keeps Originals/<camera> structure,
+    /// records the absolute path, and leaves the project defaults intact.
+    #[test]
+    fn import_to_picked_destination() {
+        let base = TestDir::new("dest-base");
+        let card = TestDir::new("dest-card");
+        let picked = TestDir::new("dest-picked");
+        let project = make_project(&base);
+        write_file(card.path(), "DCIM/IMG_0001.cr2", &[5u8; 512]);
+
+        let result = import_camera_files(
+            &project.project_path,
+            card.path().to_str().unwrap(),
+            "Camera 1",
+            Some(picked.path().to_str().unwrap()),
+        )
+        .unwrap();
+        assert_eq!(result.imported, 1);
+        let landed = picked.path().join("Originals/Camera 1/IMG_0001.cr2");
+        assert!(landed.exists(), "file must land under picked/Originals/Camera 1");
+        // Default project Originals stays empty.
+        assert!(fs::read_dir(PathBuf::from(&project.project_path).join("Originals/Camera 1"))
+            .unwrap().next().is_none());
+        // Auto-correct resolves the moved file through the recorded absolute path.
+        let report = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}).unwrap();
+        assert_eq!(report.processed, 1);
     }
 
     /// Import rejects anything but Camera 1 / Camera 2.
@@ -664,7 +1087,7 @@ mod tests {
         let base = TestDir::new("camera-base");
         let card = TestDir::new("camera-card");
         let project = make_project(&base);
-        let result = import_camera_files(&project.project_path, card.path().to_str().unwrap(), "Camera 3");
+        let result = import_camera_files(&project.project_path, card.path().to_str().unwrap(), "Camera 3", None);
         assert!(result.is_err());
     }
 
@@ -674,7 +1097,7 @@ mod tests {
         let base = TestDir::new("notproj-base");
         let card = TestDir::new("notproj-card");
         write_file(card.path(), "A.jpg", b"bytes");
-        let result = import_camera_files(base.path().to_str().unwrap(), card.path().to_str().unwrap(), "Camera 1");
+        let result = import_camera_files(base.path().to_str().unwrap(), card.path().to_str().unwrap(), "Camera 1", None);
         assert!(result.is_err());
     }
 }

@@ -1641,3 +1641,7 @@ select:focus {
     max-width: 100%;
   }
 }
+
+.status-ok {
+  color: #4ade80;
+}

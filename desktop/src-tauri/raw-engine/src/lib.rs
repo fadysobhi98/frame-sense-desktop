@@ -1,0 +1,232 @@
+//! Frame Sense RAW engine.
+//!
+//! Decodes camera RAW files (via rawler, LGPL-2.1) and everyday images,
+//! applies the Smart Basic auto-correction, and writes an 8-bit sRGB JPEG.
+//! Exposed as a small C ABI so the main app can load this as
+//! framesense_raw.dll at runtime; also usable as a plain Rust crate.
+
+pub mod pipeline;
+
+use image::{DynamicImage, GenericImageView};
+use rawler::imgop::develop::RawDevelop;
+use std::ffi::{c_char, CStr, CString};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+/// Extensions decoded through rawler. Everyday raster formats
+/// (jpg/png/webp/heic) go through the `image` crate instead.
+pub fn is_raw_extension(ext: &str) -> bool {
+    let ext = ext.to_ascii_lowercase();
+    matches!(
+        ext.as_str(),
+        "arw" | "srf" | "sr2" | "cr2" | "cr3" | "crw" | "nef" | "nrw" | "raf" | "orf" | "rw2"
+            | "rwl" | "pef" | "ptx" | "srw" | "dng" | "3fr" | "fff" | "iiq" | "x3f" | "mrw"
+            | "erf" | "mef" | "mos" | "dcr" | "k25" | "kdc" | "gpr" | "bay" | "raw"
+    )
+}
+
+pub fn is_supported_photo(path: &Path) -> bool {
+    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+        return false;
+    };
+    let ext = ext.to_ascii_lowercase();
+    is_raw_extension(&ext) || matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp")
+}
+
+pub fn decode_to_dynamic(path: &Path) -> Result<DynamicImage, String> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    if is_raw_extension(&ext) {
+        let raw = rawler::decode_file(path)
+            .map_err(|e| format!("RAW decode failed: {e}"))?;
+        let develop = RawDevelop::default();
+        let intermediate = develop
+            .develop_intermediate(&raw)
+            .map_err(|e| format!("RAW develop failed: {e}"))?;
+        intermediate
+            .to_dynamic_image()
+            .ok_or_else(|| "RAW developed to an unsupported pixel layout".to_string())
+    } else {
+        image::open(path).map_err(|e| format!("image open failed: {e}"))
+    }
+}
+
+/// Decode one photo, auto-correct it, and write an 8-bit JPEG at `dst`
+/// (parent folder must exist). Returns the JPEG dimensions on success.
+pub fn auto_correct_file(src: &Path, dst: &Path, quality: u8) -> Result<(u32, u32), String> {
+    let decoded = decode_to_dynamic(src)?;
+    let corrected = pipeline::auto_correct(&decoded);
+    let (w, h) = corrected.dimensions();
+    if w == 0 || h == 0 {
+        return Err("decoded image is empty".to_string());
+    }
+    let rgb8 = corrected.to_rgb8();
+    let tmp: PathBuf = dst.with_extension("jpg.tmp");
+    {
+        let mut out = std::io::BufWriter::new(
+            std::fs::File::create(&tmp).map_err(|e| format!("cannot create output: {e}"))?,
+        );
+        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
+            &mut out,
+            quality.clamp(50, 100),
+        );
+        use image::ImageEncoder;
+        encoder
+            .write_image(&rgb8, w, h, image::ExtendedColorType::Rgb8)
+            .map_err(|e| format!("JPEG encode failed: {e}"))?;
+    }
+    std::fs::rename(&tmp, dst).map_err(|e| format!("cannot finalize output: {e}"))?;
+    Ok((w, h))
+}
+
+// ---------------------------------------------------------------------------
+// C ABI used by the desktop app through framesense_raw.dll
+// ---------------------------------------------------------------------------
+
+static LAST_ERROR: Mutex<Option<CString>> = Mutex::new(None);
+
+fn set_last_error(message: String) {
+    if let Ok(mut slot) = LAST_ERROR.lock() {
+        *slot = CString::new(message).ok();
+    }
+}
+
+fn take_last_error() -> CString {
+    match LAST_ERROR.lock() {
+        Ok(mut slot) => slot.take().unwrap_or_else(|| CString::new("unknown error").unwrap()),
+        Err(_) => CString::new("unknown error").unwrap(),
+    }
+}
+
+fn read_c_path<'a>(ptr: *const c_char, what: &str) -> Result<PathBuf, String> {
+    if ptr.is_null() {
+        return Err(format!("{what} path is null"));
+    }
+    let text = unsafe { CStr::from_ptr(ptr) }
+        .to_str()
+        .map_err(|_| format!("{what} path is not valid UTF-8"))?;
+    Ok(PathBuf::from(text))
+}
+
+/// Process one photo file. `dst` must end in .jpg; its parent must exist.
+/// Returns 0 on success, or an error code (message via fs_raw_last_error):
+///   1 = decode/develop failed   2 = output write failed   3 = bad arguments
+#[no_mangle]
+pub extern "C" fn fs_raw_auto_correct_file(
+    src: *const c_char,
+    dst: *const c_char,
+    quality: u8,
+) -> i32 {
+    let run = || -> Result<(), String> {
+        let src = read_c_path(src, "source")?;
+        let dst = read_c_path(dst, "destination")?;
+        if !src.is_file() {
+            return Err(format!("source file not found: {}", src.display()));
+        }
+        match auto_correct_file(&src, &dst, quality) {
+            Ok(_) => Ok(()),
+            Err(e) if e.contains("cannot create output") || e.contains("cannot finalize") => {
+                set_last_error(e);
+                return Err("io".to_string());
+            }
+            Err(e) => Err(e),
+        }
+    };
+    match run() {
+        Ok(()) => 0,
+        Err(e) if e == "io" => 2,
+        Err(e) => {
+            set_last_error(e);
+            1
+        }
+    }
+}
+
+/// Last error message. Free with fs_raw_free_string. Never null.
+#[no_mangle]
+pub extern "C" fn fs_raw_last_error() -> *mut c_char {
+    take_last_error().into_raw()
+}
+
+#[no_mangle]
+pub extern "C" fn fs_raw_free_string(s: *mut c_char) {
+    if !s.is_null() {
+        unsafe {
+            let _ = CString::from_raw(s);
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn fs_raw_engine_version() -> *mut c_char {
+    CString::new(env!("CARGO_PKG_VERSION")).unwrap().into_raw()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::RgbImage;
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "framesense-raw-test-{label}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn jpeg_input_produces_jpeg_output() {
+        let dir = temp_dir("jpeg");
+        let src = dir.join("photo.JPEG");
+        let mut img = RgbImage::new(64, 48);
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            *p = image::Rgb([(x * 4) as u8, (y * 5) as u8, 128]);
+        }
+        DynamicImage::ImageRgb8(img).save(&src).unwrap();
+
+        let dst = dir.join("out").join("photo.jpg");
+        std::fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        let (w, h) = auto_correct_file(&src, &dst, 90).unwrap();
+        assert_eq!((w, h), (64, 48));
+        let bytes = std::fs::read(&dst).unwrap();
+        assert_eq!(&bytes[0..2], &[0xFF, 0xD8], "output must be a JPEG");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn missing_source_is_an_error_not_a_panic() {
+        let dir = temp_dir("missing");
+        let result = auto_correct_file(&dir.join("nope.cr2"), &dir.join("out.jpg"), 90);
+        assert!(result.is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ffi_roundtrip_reports_errors() {
+        let dir = temp_dir("ffi");
+        let src = CString::new(dir.join("nope.cr2").to_string_lossy().to_string()).unwrap();
+        let dst = CString::new(dir.join("out.jpg").to_string_lossy().to_string()).unwrap();
+        let code = fs_raw_auto_correct_file(src.as_ptr(), dst.as_ptr(), 90);
+        assert_eq!(code, 3 - 3 + 1); // decode-class error
+        let msg_ptr = fs_raw_last_error();
+        assert!(!msg_ptr.is_null());
+        fs_raw_free_string(msg_ptr);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn extension_sets_cover_common_raw() {
+        for ext in ["cr2", "CR3", "Arw", "nef", "RAF", "dng", "orf", "rw2"] {
+            assert!(is_raw_extension(ext), "{ext} must decode through rawler");
+        }
+        for ext in ["jpg", "jpeg", "png", "webp"] {
+            assert!(!is_raw_extension(ext));
+        }
+    }
+}

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, Channel } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
@@ -28,6 +28,29 @@ type ImportResult = {
   destination: string;
 };
 
+type AutoCorrectProgress = {
+  current: number;
+  total: number;
+  file: string;
+  processed: number;
+  failed: number;
+};
+
+type AutoCorrectReport = {
+  total: number;
+  processed: number;
+  already_done: number;
+  failed: { file: string; error: string }[];
+  output_dir: string;
+};
+
+type RawEngineStatus = {
+  available: boolean;
+  version: string | null;
+  path: string | null;
+  error: string | null;
+};
+
 const nav: { name: Page; icon: typeof LayoutDashboard }[] = [
   { name: "Dashboard", icon: LayoutDashboard },
   { name: "Projects & Import", icon: FolderOpen },
@@ -44,7 +67,7 @@ const nav: { name: Page; icon: typeof LayoutDashboard }[] = [
 const plannedCopy: Record<Page, string> = {
   "Dashboard": "",
   "Projects & Import": "",
-  "Processing Center": "Queue execution, pause/resume dependencies and detailed per-camera processing are planned after the project/import foundation.",
+  "Processing Center": "",
   "Photo Gallery": "RAW decoding, previews, filtering and non-destructive edit controls are planned. Original files remain untouched.",
   "Quality Review": "AI Smart Review & Repair is not connected yet. This screen is reserved for human approval after real analysis is integrated.",
   "AI Creative Studio": "Local AI model integration and Creative Set generation are planned. No cloud AI is required by the approved specification.",
@@ -69,6 +92,17 @@ function App() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
+  const [destinationDir, setDestinationDir] = useState("");
+  const [outputDir, setOutputDir] = useState("");
+  const [quality, setQuality] = useState(90);
+  const [acProgress, setAcProgress] = useState<AutoCorrectProgress | null>(null);
+  const [acReport, setAcReport] = useState<AutoCorrectReport | null>(null);
+  const [acBusy, setAcBusy] = useState(false);
+  const [engineStatus, setEngineStatus] = useState<RawEngineStatus | null>(null);
+
+useEffect(() => {
+  invoke<RawEngineStatus>("raw_engine_status").then(setEngineStatus).catch(() => setEngineStatus(null));
+}, []);
 const [isFullscreen, setIsFullscreen] = useState(false);
 
 useEffect(() => {
@@ -115,6 +149,25 @@ const toggleFullscreen = async () => {
     console.error(error);
   }
 };
+  async function startAutoCorrect() {
+    setError(""); setMessage(""); setAcReport(null);
+    setAcBusy(true);
+    setAcProgress({ current: 0, total: 0, file: "", processed: 0, failed: 0 });
+    const channel = new Channel<AutoCorrectProgress>();
+    channel.onmessage = (p) => setAcProgress(p);
+    try {
+      const report = await invoke<AutoCorrectReport>("auto_correct_camera", {
+        projectPath, cameraId, outputDir: outputDir.trim() || null, quality, onProgress: channel
+      });
+      setAcReport(report);
+      setMessage(`Auto-correction finished: ${report.processed} corrected, ${report.already_done} already done, ${report.failed.length} failed.`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setAcBusy(false);
+    }
+  }
+
   const currentIcon = useMemo(() => nav.find((n) => n.name === page)?.icon ?? LayoutDashboard, [page]);
   const CurrentIcon = currentIcon;
 
@@ -139,7 +192,8 @@ const toggleFullscreen = async () => {
     setError(""); setMessage(""); setImportResult(null); setBusy(true);
     try {
       const result = await invoke<ImportResult>("import_camera_files", {
-        projectPath, sourcePath, cameraId
+        projectPath, sourcePath, cameraId,
+        destinationDir: destinationDir.trim() || null
       });
       setImportResult(result);
       setMessage(`Import finished for ${result.camera_id}.`);
@@ -290,7 +344,82 @@ const toggleFullscreen = async () => {
             </div>
           )}
 
-          {page !== "Dashboard" && page !== "Projects & Import" && (
+          {page === "Processing Center" && (
+            <div className="two-column">
+              <section className="panel">
+                <div className="panel-heading"><div><span className="step-tag">03 / AUTO-CORRECT</span><h3>Smart Basic auto-correction</h3><p>Fixes exposure and contrast on the camera lane. Not AI. Original RAW files stay untouched; corrected 8-bit JPEGs go to the output folder.</p></div><WandSparkles/></div>
+                <label>Project folder<input value={projectPath} onChange={(e) => setProjectPath(e.target.value)} placeholder="Create a project first, or paste its path"/></label>
+                <label>Camera lane<select value={cameraId} onChange={(e) => setCameraId(e.target.value)}><option>Camera 1</option><option>Camera 2</option></select></label>
+                <label>Output folder (optional)</label>
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <input
+                    value={outputDir}
+                    readOnly
+                    placeholder="Default: the project's Export folder"
+                    style={{ flex: 1, minWidth: 0 }}
+                  />
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={async () => {
+                      const selected = await openDialog({
+                        directory: true,
+                        multiple: false,
+                        title: "Choose where corrected JPEGs go",
+                      });
+                      if (typeof selected === "string") {
+                        setOutputDir(selected);
+                      }
+                    }}
+                  >
+                    <FolderOpen size={16} />
+                    Browse
+                  </button>
+                  {outputDir && (
+                    <button type="button" className="icon-button" title="Back to default" onClick={() => setOutputDir("")}>
+                      <XCircle size={16} />
+                    </button>
+                  )}
+                </div>
+                <label>JPEG quality: {quality}<input type="range" min={50} max={100} value={quality} onChange={(e) => setQuality(Number(e.target.value))}/></label>
+                <button className="primary-button full" disabled={acBusy || !projectPath.trim() || engineStatus?.available === false} onClick={startAutoCorrect}>
+                  {acBusy ? <RefreshCw className="spin" size={16}/> : <WandSparkles size={16}/>} Start auto-correction
+                </button>
+                {acProgress && acProgress.total > 0 && (
+                  <div className="import-summary">
+                    <strong>{acProgress.current} / {acProgress.total}</strong>
+                    <span>{acProgress.file}</span>
+                    <div style={{ height: 8, background: "rgba(128,128,128,0.25)", borderRadius: 4, overflow: "hidden" }}>
+                      <div style={{ width: `${(acProgress.current / acProgress.total) * 100}%`, height: "100%", background: "currentColor" }} />
+                    </div>
+                  </div>
+                )}
+                {acReport && (
+                  <div className="import-summary">
+                    <strong>Auto-correction report</strong>
+                    <span>Corrected: {acReport.processed}</span>
+                    <span>Already done (skipped): {acReport.already_done}</span>
+                    <span>Failed: {acReport.failed.length}</span>
+                    <small>{acReport.output_dir}</small>
+                    {acReport.failed.slice(0, 5).map((f) => (
+                      <small key={f.file}>{f.file}: {f.error}</small>
+                    ))}
+                  </div>
+                )}
+                <p className="field-note">Automatic exposure and contrast only. It does not smooth skin, remove objects or restyle the photo. Re-running skips photos already done at the same quality.</p>
+              </section>
+
+              <section className="panel">
+                <div className="panel-heading"><div><span className="step-tag">ENGINE</span><h3>RAW engine</h3><p>Decodes camera RAW files locally on this computer. No cloud, nothing uploaded.</p></div><Cpu/></div>
+                {engineStatus === null && <p className="field-note">Checking engine...</p>}
+                {engineStatus?.available && <div className="import-summary"><strong className="status-ok">Connected</strong><span>Version {engineStatus.version}</span><small>{engineStatus.path}</small></div>}
+                {engineStatus && !engineStatus.available && <div className="import-summary"><strong>Not available</strong><small>{engineStatus.error}</small></div>}
+                <p className="field-note">Honest label: Smart Basic is deterministic histogram correction, not the AI features from the Frame Sense specification. Those remain planned.</p>
+              </section>
+            </div>
+          )}
+
+          {page !== "Dashboard" && page !== "Projects & Import" && page !== "Processing Center" && (
             <section className="planned-panel">
               <div className="planned-icon"><CurrentIcon size={28}/></div>
               <span className="step-tag">ROADMAP MODULE</span>
@@ -304,7 +433,7 @@ const toggleFullscreen = async () => {
           <footer className="content-footer">
             <span><ShieldCheck size={14}/> Local-first by design</span>
             <span><CircleHelp size={14}/> Starter scaffold · not a finished product</span>
-            <span><Command size={14}/> v0.1.0</span>
+            <span><Command size={14}/> v0.2.0</span>
           </footer>
         </div>
       </main>
@@ -325,7 +454,7 @@ const toggleFullscreen = async () => {
         </div>
         <div className="inspector-block">
           <div className="inspector-label">ENGINE STATUS</div>
-          <div className="engine-row"><span>RAW Engine</span><b className="status-planned">Not connected</b></div>
+          <div className="engine-row"><span>RAW Engine</span><b className={engineStatus?.available ? "status-ok" : "status-planned"}>{engineStatus?.available ? "Connected" : "Not connected"}</b></div>
           <div className="engine-row"><span>Local AI</span><b className="status-planned">Not connected</b></div>
           <div className="engine-row"><span>Color Pipeline</span><b className="status-planned">Not connected</b></div>
           <div className="engine-row"><span>Remote Sync</span><b className="status-planned">Not connected</b></div>

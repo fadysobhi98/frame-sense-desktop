@@ -1,0 +1,16 @@
+[package]
+name = "framesense-raw"
+version = "0.2.0"
+edition = "2021"
+description = "Frame Sense RAW decode + Smart Basic auto-correction engine"
+license = "LGPL-2.1-only"
+
+# Ships as its own DLL (framesense_raw.dll) that the main app loads at
+# runtime, keeping the LGPL-2.1 rawler decoder in a separate replaceable
+# binary. rlib so the main app's test harness can link it directly.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rawler = "0.8"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }

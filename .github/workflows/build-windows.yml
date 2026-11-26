@@ -26,9 +26,18 @@ jobs:
         working-directory: desktop
         run: npm ci
 
-      - name: Run core tests (project creation + safe import)
+      - name: Run core tests (project creation, safe import, auto-correction logic)
         working-directory: desktop/src-tauri
         run: cargo test
+
+      - name: Test and build the RAW engine DLL
+        working-directory: desktop/src-tauri/raw-engine
+        run: |
+          cargo test
+          cargo build --release
+
+      - name: Stage RAW engine DLL for bundling
+        run: Copy-Item desktop/src-tauri/raw-engine/target/release/framesense_raw.dll desktop/src-tauri/framesense_raw.dll
 
       - name: Build the app and create a GitHub Release with the installer
         uses: tauri-apps/tauri-action@v0
@@ -38,6 +47,6 @@ jobs:
           projectPath: desktop
           tagName: frame-sense-v__VERSION__
           releaseName: "Frame Sense v__VERSION__"
-          releaseBody: "Windows installer. Download the Frame Sense .exe under Assets, open it, and follow the installer."
+          releaseBody: "Windows installer. Download the Frame Sense .exe under Assets, open it, and follow the installer. v0.2.0 adds Smart Basic auto-correction for RAW photos (local, not AI) and lets you choose import and output folders."
           releaseDraft: false
           prerelease: true
