@@ -42,6 +42,7 @@ type AutoCorrectReport = {
   already_done: number;
   failed: { file: string; error: string }[];
   output_dir: string;
+  stopped: boolean;
 };
 
 type RawEngineStatus = {
@@ -99,6 +100,7 @@ function App() {
   const [acProgress, setAcProgress] = useState<AutoCorrectProgress | null>(null);
   const [acReport, setAcReport] = useState<AutoCorrectReport | null>(null);
   const [acBusy, setAcBusy] = useState(false);
+  const [acPaused, setAcPaused] = useState(false);
   const [engineStatus, setEngineStatus] = useState<RawEngineStatus | null>(null);
 
 useEffect(() => {
@@ -152,6 +154,11 @@ const toggleFullscreen = async () => {
 };
   function finishAutoCorrect(report: AutoCorrectReport) {
     setAcReport(report);
+    setAcPaused(false);
+    if (report.stopped) {
+      setMessage(`Stopped: ${report.processed} corrected before stopping. Run again to continue the rest.`);
+      return;
+    }
     if (report.total === 0) {
       setMessage("Found 0 photos in that folder. The app looks for RAW and JPEG photos, including inside subfolders.");
     } else {
@@ -162,6 +169,7 @@ const toggleFullscreen = async () => {
   async function startFolderCorrect() {
     setError(""); setMessage(""); setAcReport(null);
     setAcBusy(true);
+    setAcPaused(false);
     setAcProgress({ current: 0, total: 0, file: "", processed: 0, failed: 0 });
     const channel = new Channel<AutoCorrectProgress>();
     channel.onmessage = (p) => setAcProgress(p);
@@ -180,6 +188,7 @@ const toggleFullscreen = async () => {
   async function startAutoCorrect() {
     setError(""); setMessage(""); setAcReport(null);
     setAcBusy(true);
+    setAcPaused(false);
     setAcProgress({ current: 0, total: 0, file: "", processed: 0, failed: 0 });
     const channel = new Channel<AutoCorrectProgress>();
     channel.onmessage = (p) => setAcProgress(p);
@@ -436,12 +445,38 @@ const toggleFullscreen = async () => {
                 <button className="primary-button full" disabled={acBusy || !folderSource.trim() || engineStatus?.available === false} onClick={startFolderCorrect}>
                   {acBusy ? <RefreshCw className="spin" size={16}/> : <WandSparkles size={16}/>} Correct this folder
                 </button>
-                {acProgress && acBusy && acProgress.total > 0 && (
+                {acProgress && acBusy && (
                   <div className="import-summary">
-                    <strong>{acProgress.current} / {acProgress.total}</strong>
+                    <strong>{acProgress.total > 0 ? `${acProgress.current} / ${acProgress.total}` : "Starting..."}</strong>
                     <span>{acProgress.file}</span>
-                    <div style={{ height: 8, background: "rgba(128,128,128,0.25)", borderRadius: 4, overflow: "hidden" }}>
-                      <div style={{ width: `${(acProgress.current / acProgress.total) * 100}%`, height: "100%", background: "currentColor" }} />
+                    {acProgress.total > 0 && (
+                      <div style={{ height: 8, background: "rgba(128,128,128,0.25)", borderRadius: 4, overflow: "hidden" }}>
+                        <div style={{ width: `${(acProgress.current / acProgress.total) * 100}%`, height: "100%", background: "currentColor" }} />
+                      </div>
+                    )}
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        onClick={async () => {
+                          const next = !acPaused;
+                          await invoke("set_processing_control", { command: next ? "pause" : "resume" });
+                          setAcPaused(next);
+                        }}
+                      >
+                        {acPaused ? "Resume" : "Pause"}
+                      </button>
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        onClick={async () => {
+                          await invoke("set_processing_control", { command: "stop" });
+                          setAcPaused(false);
+                        }}
+                      >
+                        Stop
+                      </button>
+                      {acPaused && <span className="field-note">Paused</span>}
                     </div>
                   </div>
                 )}
@@ -449,6 +484,7 @@ const toggleFullscreen = async () => {
                   <div className="import-summary">
                     <strong>Auto-correction report</strong>
                     <span>Photos found: {acReport.total}</span>
+                    {acReport.stopped && <span>Stopped early</span>}
                     <span>Corrected: {acReport.processed}</span>
                     <span>Already done (skipped): {acReport.already_done}</span>
                     <span>Failed: {acReport.failed.length}</span>
@@ -495,7 +531,7 @@ const toggleFullscreen = async () => {
           <footer className="content-footer">
             <span><ShieldCheck size={14}/> Local-first by design</span>
             <span><CircleHelp size={14}/> Starter scaffold · not a finished product</span>
-            <span><Command size={14}/> v0.2.1</span>
+            <span><Command size={14}/> v0.3.0</span>
           </footer>
         </div>
       </main>

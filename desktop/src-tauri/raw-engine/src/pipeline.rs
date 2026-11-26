@@ -25,6 +25,109 @@ pub struct CorrectionPlan {
     pub black_point: f32,
     pub gamma: f32,
     pub contrast_mix: f32,
+    /// Per-channel white-balance multipliers (r, g, b). 1.0 = keep as shot.
+    pub wb: (f32, f32, f32),
+    /// Skin-hue nudge strength: 0 = no skin detected / no nudge.
+    pub skin_warmth: f32,
+    /// Mild saturation multiplier for dull photos (1.0 = unchanged).
+    pub saturation: f32,
+}
+
+/// Hue (degrees) of an RGB pixel in 0..1 floats; None for near-gray.
+fn hue_degrees(r: f32, g: f32, b: f32) -> Option<f32> {
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+    if delta < 0.03 {
+        return None;
+    }
+    let h = if max == r {
+        60.0 * (((g - b) / delta) % 6.0)
+    } else if max == g {
+        60.0 * ((b - r) / delta + 2.0)
+    } else {
+        60.0 * ((r - g) / delta + 4.0)
+    };
+    Some(h.rem_euclid(360.0))
+}
+
+/// Heuristic skin test: red-dominant, moderately saturated, mid luma.
+/// Good enough to warm portraits gently; not a face detector.
+fn is_skinish(r: f32, g: f32, b: f32) -> bool {
+    let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    if !(0.12..=0.85).contains(&luma) || r <= g || g < b * 0.9 {
+        return false;
+    }
+    match hue_degrees(r, g, b) {
+        Some(h) => (5.0..=55.0).contains(&h),
+        None => false,
+    }
+}
+
+pub struct ChannelStats {
+    pub mean_r: f32,
+    pub mean_g: f32,
+    pub mean_b: f32,
+    pub mean_chroma: f32,
+    pub skin_hue_median: Option<f32>,
+}
+
+pub fn channel_stats(rgb: &Rgb32FImage) -> ChannelStats {
+    let total = (rgb.width() as usize) * (rgb.height() as usize);
+    let step = (total / 200_000).max(1);
+    let (mut sr, mut sg, mut sb, mut sc, mut n) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0usize);
+    let mut skin_hues: Vec<f32> = Vec::new();
+    for (i, pixel) in rgb.pixels().enumerate() {
+        if i % step != 0 {
+            continue;
+        }
+        let [r, g, b] = pixel.0;
+        sr += r as f64;
+        sg += g as f64;
+        sb += b as f64;
+        sc += (r.max(g).max(b) - r.min(g).min(b)) as f64;
+        n += 1;
+        if is_skinish(r, g, b) {
+            if let Some(h) = hue_degrees(r, g, b) {
+                skin_hues.push(h);
+            }
+        }
+    }
+    if n == 0 {
+        return ChannelStats { mean_r: 0.0, mean_g: 0.0, mean_b: 0.0, mean_chroma: 0.0, skin_hue_median: None };
+    }
+    let skin_hue_median = if skin_hues.len() * 200 >= n {
+        skin_hues.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        Some(skin_hues[skin_hues.len() / 2])
+    } else {
+        None
+    };
+    ChannelStats {
+        mean_r: (sr / n as f64) as f32,
+        mean_g: (sg / n as f64) as f32,
+        mean_b: (sb / n as f64) as f32,
+        mean_chroma: (sc / n as f64) as f32,
+        skin_hue_median,
+    }
+}
+
+/// White balance: partial gray-world. The stronger the measured cast, the
+/// more we correct, but never to full neutral (that kills mood and warmth).
+pub fn white_balance_gains(stats: &ChannelStats) -> (f32, f32, f32) {
+    let avg = (stats.mean_r + stats.mean_g + stats.mean_b) / 3.0;
+    if avg < 1e-4 {
+        return (1.0, 1.0, 1.0);
+    }
+    let cast = ((stats.mean_r - avg).abs() + (stats.mean_b - avg).abs()) / avg;
+    let strength = (cast * 2.0).clamp(0.10, 0.65);
+    let warm_bias = 1.0 + 0.06 * strength; // stop short of clinical neutral
+    let mut r = 1.0 + strength * (avg * warm_bias / stats.mean_r.max(1e-4) - 1.0);
+    let mut g = 1.0 + strength * (avg / stats.mean_g.max(1e-4) - 1.0);
+    let mut b = 1.0 + strength * (avg / warm_bias / stats.mean_b.max(1e-4) - 1.0);
+    r = r.clamp(0.8, 1.25);
+    g = g.clamp(0.85, 1.2);
+    b = b.clamp(0.75, 1.25);
+    (r, g, b)
 }
 
 pub fn plan_from_lumas(sorted_lumas: &[f32]) -> CorrectionPlan {
@@ -54,7 +157,26 @@ pub fn plan_from_lumas(sorted_lumas: &[f32]) -> CorrectionPlan {
         black_point,
         gamma,
         contrast_mix,
+        wb: (1.0, 1.0, 1.0),
+        skin_warmth: 0.0,
+        saturation: 1.0,
     }
+}
+
+/// Full per-photo plan: exposure from the luma histogram, white balance and
+/// warmth/skin nudges from channel statistics.
+pub fn plan_for_image(rgb: &Rgb32FImage) -> CorrectionPlan {
+    let lumas = sample_lumas(rgb);
+    let mut plan = plan_from_lumas(&lumas);
+    let stats = channel_stats(rgb);
+    plan.wb = white_balance_gains(&stats);
+    // Skin: nudge median skin hue toward a warm natural ~38 deg, max +-4 deg.
+    if let Some(h) = stats.skin_hue_median {
+        plan.skin_warmth = ((38.0 - h) / 38.0 * 0.10).clamp(-0.04, 0.04);
+    }
+    // Dull photos get a touch of saturation, lively ones stay put.
+    plan.saturation = (1.0 + (0.10 - stats.mean_chroma) * 0.6).clamp(1.0, 1.07);
+    plan
 }
 
 fn smoothstep(x: f32) -> f32 {
@@ -63,9 +185,27 @@ fn smoothstep(x: f32) -> f32 {
 
 pub fn apply_plan(rgb: &mut Rgb32FImage, plan: &CorrectionPlan) {
     for pixel in rgb.pixels_mut() {
-        for channel in pixel.0.iter_mut() {
+        let [r0, g0, b0] = pixel.0;
+        // White balance.
+        let mut r = r0 * plan.wb.0;
+        let mut g = g0 * plan.wb.1;
+        let mut b = b0 * plan.wb.2;
+        // Skin warmth nudge (only where skin was detected).
+        if plan.skin_warmth != 0.0 && is_skinish(r, g, b) {
+            r *= 1.0 + plan.skin_warmth;
+            b *= 1.0 - plan.skin_warmth;
+        }
+        // Gentle saturation around the pixel's own gray point.
+        if plan.saturation > 1.0 {
+            let gray = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            r = gray + (r - gray) * plan.saturation;
+            g = gray + (g - gray) * plan.saturation;
+            b = gray + (b - gray) * plan.saturation;
+        }
+        let channels = [r, g, b];
+        for (i, channel) in pixel.0.iter_mut().enumerate() {
             // Exposure gain, small black-point floor, optional dull-image lift.
-            let mut x = (*channel * plan.gain - plan.black_point).max(0.0);
+            let mut x = (channels[i] * plan.gain - plan.black_point).max(0.0);
             x = x.powf(plan.gamma);
             // Soft highlight shoulder: eases into 1.0 instead of clipping.
             if x > 0.95 {
@@ -99,11 +239,10 @@ pub fn sample_lumas(rgb: &Rgb32FImage) -> Vec<f32> {
 
 pub fn auto_correct(image: &DynamicImage) -> DynamicImage {
     let mut rgb = image.to_rgb32f();
-    let lumas = sample_lumas(&rgb);
-    if lumas.is_empty() {
+    if rgb.width() == 0 || rgb.height() == 0 {
         return image.clone();
     }
-    let plan = plan_from_lumas(&lumas);
+    let plan = plan_for_image(&rgb);
     apply_plan(&mut rgb, &plan);
     DynamicImage::ImageRgb32F(rgb)
 }
@@ -149,7 +288,7 @@ mod tests {
         for (i, p) in img.pixels_mut().enumerate() {
             *p = image::Rgb([i as f32 / 16.0, 0.5, 1.0 - i as f32 / 16.0]);
         }
-        let plan = CorrectionPlan { gain: 2.0, black_point: 0.05, gamma: 1.0, contrast_mix: 0.2 };
+        let plan = CorrectionPlan { gain: 2.0, black_point: 0.05, gamma: 1.0, contrast_mix: 0.2, wb: (1.0, 1.0, 1.0), skin_warmth: 0.0, saturation: 1.0 };
         apply_plan(&mut img, &plan);
         for p in img.pixels() {
             for c in p.0 {

@@ -176,6 +176,37 @@ fn raw_engine_status() -> RawEngineStatus {
     }
 }
 
+// Processing control shared by both auto-correct commands.
+static PROCESSING_CONTROL: std::sync::Mutex<u8> = std::sync::Mutex::new(0); // 0 run, 1 pause, 2 stop
+
+fn processing_control() -> core::ControlAction {
+    match PROCESSING_CONTROL.lock().map(|v| *v).unwrap_or(0) {
+        1 => core::ControlAction::Pause,
+        2 => core::ControlAction::Stop,
+        _ => core::ControlAction::Continue,
+    }
+}
+
+fn reset_processing_control() {
+    if let Ok(mut v) = PROCESSING_CONTROL.lock() {
+        *v = 0;
+    }
+}
+
+#[command]
+fn set_processing_control(command: String) -> Result<(), String> {
+    let value = match command.as_str() {
+        "pause" => 1,
+        "resume" => 0,
+        "stop" => 2,
+        _ => return Err(format!("unknown control command: {command}")),
+    };
+    if let Ok(mut v) = PROCESSING_CONTROL.lock() {
+        *v = value;
+    }
+    Ok(())
+}
+
 #[command]
 fn auto_correct_folder(
     folder_path: String,
@@ -184,6 +215,7 @@ fn auto_correct_folder(
     on_progress: tauri::ipc::Channel<core::AutoCorrectProgress>,
 ) -> Result<core::AutoCorrectReport, String> {
     engine()?;
+    reset_processing_control();
     let quality = quality.unwrap_or(core::DEFAULT_JPEG_QUALITY);
     core::run_auto_correct_folder(
         &folder_path,
@@ -193,6 +225,7 @@ fn auto_correct_folder(
         &|p| {
             let _ = on_progress.send(p);
         },
+        &processing_control,
     )
 }
 
@@ -206,6 +239,7 @@ fn auto_correct_camera(
 ) -> Result<core::AutoCorrectReport, String> {
     // Surface a missing engine before touching the project.
     engine()?;
+    reset_processing_control();
     let quality = quality.unwrap_or(core::DEFAULT_JPEG_QUALITY);
     core::run_auto_correct(
         &project_path,
@@ -216,6 +250,7 @@ fn auto_correct_camera(
         &|p| {
             let _ = on_progress.send(p);
         },
+        &processing_control,
     )
 }
 
@@ -227,6 +262,7 @@ pub fn run() {
             import_camera_files,
             auto_correct_camera,
             auto_correct_folder,
+            set_processing_control,
             raw_engine_status
         ])
         .run(tauri::generate_context!())

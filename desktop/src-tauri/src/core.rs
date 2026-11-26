@@ -489,6 +489,13 @@ pub fn import_camera_files(
 pub const DEFAULT_JPEG_QUALITY: u8 = 90;
 pub const SMART_BASIC_PARAMS_VERSION: &str = "smart-basic-v1";
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ControlAction {
+    Continue,
+    Pause,
+    Stop,
+}
+
 #[derive(Serialize, Clone)]
 pub struct AutoCorrectProgress {
     pub current: usize,
@@ -511,6 +518,7 @@ pub struct AutoCorrectReport {
     pub already_done: usize,
     pub failed: Vec<AutoCorrectFailure>,
     pub output_dir: String,
+    pub stopped: bool,
 }
 
 /// Run Smart Basic auto-correction over one camera lane of a project.
@@ -526,6 +534,7 @@ pub fn run_auto_correct(
     quality: u8,
     correct: &dyn Fn(&Path, &Path, u8) -> Result<(), String>,
     progress: &dyn Fn(AutoCorrectProgress),
+    control: &dyn Fn() -> ControlAction,
 ) -> Result<AutoCorrectReport, String> {
     if camera_id != "Camera 1" && camera_id != "Camera 2" {
         return Err("Camera must be Camera 1 or Camera 2.".into());
@@ -576,9 +585,25 @@ pub fn run_auto_correct(
     let mut already_done = 0usize;
     let mut failed: Vec<AutoCorrectFailure> = Vec::new();
 
+    let mut stopped = false;
     for (index, (_id, original_name, relative_path, absolute_path, sha256)) in
         files.into_iter().enumerate()
     {
+        loop {
+            match control() {
+                ControlAction::Continue => break,
+                ControlAction::Pause => {
+                    std::thread::sleep(std::time::Duration::from_millis(150))
+                }
+                ControlAction::Stop => {
+                    stopped = true;
+                    break;
+                }
+            }
+        }
+        if stopped {
+            break;
+        }
         progress(AutoCorrectProgress {
             current: index + 1,
             total,
@@ -664,6 +689,7 @@ pub fn run_auto_correct(
         already_done,
         failed,
         output_dir: display_path(&output_camera_dir),
+        stopped,
     })
 }
 
@@ -724,6 +750,7 @@ pub fn run_auto_correct_folder(
     quality: u8,
     correct: &dyn Fn(&Path, &Path, u8) -> Result<(), String>,
     progress: &dyn Fn(AutoCorrectProgress),
+    control: &dyn Fn() -> ControlAction,
 ) -> Result<AutoCorrectReport, String> {
     let quality = quality.clamp(50, 100);
     let folder_root = canonical_for_compare(&PathBuf::from(folder_path.trim()));
@@ -766,7 +793,23 @@ pub fn run_auto_correct_folder(
     let mut already_done = 0usize;
     let mut failed: Vec<AutoCorrectFailure> = Vec::new();
 
+    let mut stopped = false;
     for (index, source_file) in files.into_iter().enumerate() {
+        loop {
+            match control() {
+                ControlAction::Continue => break,
+                ControlAction::Pause => {
+                    std::thread::sleep(std::time::Duration::from_millis(150))
+                }
+                ControlAction::Stop => {
+                    stopped = true;
+                    break;
+                }
+            }
+        }
+        if stopped {
+            break;
+        }
         let name = source_file
             .file_name()
             .and_then(|n| n.to_str())
@@ -813,6 +856,7 @@ pub fn run_auto_correct_folder(
         already_done,
         failed,
         output_dir: display_path(&output_root),
+        stopped,
     })
 }
 
@@ -1117,6 +1161,7 @@ mod tests {
             90,
             &fake_correct_ok,
             &|_| {},
+            &|| ControlAction::Continue,
         )
         .unwrap();
 
@@ -1134,8 +1179,8 @@ mod tests {
     #[test]
     fn auto_correct_rerun_skips_done() {
         let (_base, _card, project) = project_with_photos();
-        let first = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}).unwrap();
-        let second = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}).unwrap();
+        let first = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue).unwrap();
+        let second = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue).unwrap();
         assert_eq!(first.processed, 2);
         assert_eq!(second.processed, 0);
         assert_eq!(second.already_done, 2);
@@ -1145,8 +1190,8 @@ mod tests {
     #[test]
     fn auto_correct_new_quality_reprocesses() {
         let (_base, _card, project) = project_with_photos();
-        run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}).unwrap();
-        let rerun = run_auto_correct(&project.project_path, "Camera 1", None, 80, &fake_correct_ok, &|_| {}).unwrap();
+        run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue).unwrap();
+        let rerun = run_auto_correct(&project.project_path, "Camera 1", None, 80, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue).unwrap();
         assert_eq!(rerun.processed, 2);
         // Old outputs were not overwritten; new ones got unique names.
         let dir = PathBuf::from(&project.project_path).join("Export/Camera 1");
@@ -1158,7 +1203,7 @@ mod tests {
     #[test]
     fn auto_correct_collects_failures() {
         let (_base, _card, project) = project_with_photos();
-        let report = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_fail, &|_| {}).unwrap();
+        let report = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_fail, &|_| {}, &|| ControlAction::Continue).unwrap();
         assert_eq!(report.processed, 0);
         assert_eq!(report.failed.len(), 2);
         assert!(report.failed[0].error.contains("engine exploded"));
@@ -1166,7 +1211,7 @@ mod tests {
         let leftover: Vec<_> = fs::read_dir(dir).unwrap().filter_map(|e| e.ok()).collect();
         assert!(leftover.is_empty());
         // Failure is not recorded as done: a retry with a working engine processes it.
-        let retry = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}).unwrap();
+        let retry = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue).unwrap();
         assert_eq!(retry.processed, 2);
     }
 
@@ -1182,6 +1227,7 @@ mod tests {
             90,
             &fake_correct_ok,
             &|_| {},
+            &|| ControlAction::Continue,
         )
         .unwrap();
         let picked_clean = canonical_for_compare(picked.path());
@@ -1198,6 +1244,7 @@ mod tests {
             90,
             &fake_correct_ok,
             &|_| {},
+            &|| ControlAction::Continue,
         );
         assert!(bad.is_err());
     }
@@ -1226,7 +1273,7 @@ mod tests {
         assert!(fs::read_dir(PathBuf::from(&project.project_path).join("Originals/Camera 1"))
             .unwrap().next().is_none());
         // Auto-correct resolves the moved file through the recorded absolute path.
-        let report = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}).unwrap();
+        let report = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue).unwrap();
         assert_eq!(report.processed, 1);
     }
 
@@ -1248,6 +1295,7 @@ mod tests {
             90,
             &fake_correct_ok,
             &|_| {},
+            &|| ControlAction::Continue,
         )
         .unwrap();
 
@@ -1273,6 +1321,7 @@ mod tests {
             90,
             &fake_correct_ok,
             &|_| {},
+            &|| ControlAction::Continue,
         )
         .unwrap();
         assert_eq!(report.total, 0);
@@ -1287,6 +1336,7 @@ mod tests {
             90,
             &fake_correct_ok,
             &|_| {},
+            &|| ControlAction::Continue,
         )
         .unwrap();
         assert_eq!(report.total, 0);
@@ -1299,9 +1349,9 @@ mod tests {
         let photos = TestDir::new("fold-rerun");
         write_file(photos.path(), "a.cr2", &[8u8; 128]);
 
-        let first = run_auto_correct_folder(photos.path().to_str().unwrap(), None, 90, &fake_correct_ok, &|_| {}).unwrap();
+        let first = run_auto_correct_folder(photos.path().to_str().unwrap(), None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue).unwrap();
         assert_eq!(first.processed, 1);
-        let second = run_auto_correct_folder(photos.path().to_str().unwrap(), None, 90, &fake_correct_ok, &|_| {}).unwrap();
+        let second = run_auto_correct_folder(photos.path().to_str().unwrap(), None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue).unwrap();
         assert_eq!(second.total, 1, "output JPEGs must not be re-scanned as input");
         assert_eq!(second.processed, 0);
         assert_eq!(second.already_done, 1);
@@ -1321,6 +1371,7 @@ mod tests {
             90,
             &fake_correct_ok,
             &|_| {},
+            &|| ControlAction::Continue,
         );
         assert!(same.is_err());
 
@@ -1334,6 +1385,7 @@ mod tests {
             90,
             &fake_correct_ok,
             &|_| {},
+            &|| ControlAction::Continue,
         );
         assert!(swallowing.is_err());
     }
@@ -1349,6 +1401,7 @@ mod tests {
             90,
             &fake_correct_fail,
             &|_| {},
+            &|| ControlAction::Continue,
         )
         .unwrap();
         assert_eq!(report.processed, 0);
@@ -1364,9 +1417,52 @@ mod tests {
         // Remove the pre-created Export folder tree so we can prove no recreation.
         let export = PathBuf::from(&project.project_path).join("Export");
         fs::remove_dir_all(&export).unwrap();
-        let report = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}).unwrap();
+        let report = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue).unwrap();
         assert_eq!(report.total, 0);
         assert!(!export.exists());
+    }
+
+
+    /// Stop mid-run: finishes a partial report, marks stopped, done work stays done.
+    #[test]
+    fn folder_mode_stop_is_clean() {
+        let photos = TestDir::new("fold-stop");
+        for i in 0..5 {
+            write_file(photos.path(), &format!("IMG_{i:04}.cr2"), &[i as u8; 128]);
+        }
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let control = || {
+            // Allow the first two files, then stop.
+            if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 2 {
+                ControlAction::Stop
+            } else {
+                ControlAction::Continue
+            }
+        };
+        let report = run_auto_correct_folder(
+            photos.path().to_str().unwrap(),
+            None,
+            90,
+            &fake_correct_ok,
+            &|_| {},
+            &control,
+        )
+        .unwrap();
+        assert!(report.stopped);
+        assert_eq!(report.processed, 2);
+        // A fresh run picks up the remaining three.
+        let resume = run_auto_correct_folder(
+            photos.path().to_str().unwrap(),
+            None,
+            90,
+            &fake_correct_ok,
+            &|_| {},
+            &|| ControlAction::Continue,
+        )
+        .unwrap();
+        assert_eq!(resume.processed, 3);
+        assert_eq!(resume.already_done, 2);
+        assert!(!resume.stopped);
     }
 
     /// Import rejects anything but Camera 1 / Camera 2.

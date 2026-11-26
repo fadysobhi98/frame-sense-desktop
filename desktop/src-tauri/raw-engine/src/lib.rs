@@ -6,6 +6,7 @@
 //! framesense_raw.dll at runtime; also usable as a plain Rust crate.
 
 pub mod pipeline;
+pub mod straighten;
 
 use image::{DynamicImage, GenericImageView};
 use rawler::imgop::develop::RawDevelop;
@@ -33,6 +34,35 @@ pub fn is_supported_photo(path: &Path) -> bool {
     is_raw_extension(&ext) || matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "webp")
 }
 
+/// Apply an EXIF/rawler orientation so the photo displays upright.
+fn apply_orientation(image: DynamicImage, orientation: u16) -> DynamicImage {
+    match orientation {
+        2 => image.fliph(),
+        3 => image.rotate180(),
+        4 => image.flipv(),
+        5 => image.rotate90().fliph(),
+        6 => image.rotate90(),
+        7 => image.rotate270().fliph(),
+        8 => image.rotate270(),
+        _ => image,
+    }
+}
+
+/// EXIF orientation tag for non-RAW files (JPEG etc.); 1 when absent.
+fn exif_orientation(path: &Path) -> u16 {
+    let Ok(file) = std::fs::File::open(path) else {
+        return 1;
+    };
+    let mut reader = std::io::BufReader::new(file);
+    let Ok(exif) = exif::Reader::new().read_from_container(&mut reader) else {
+        return 1;
+    };
+    exif.get_field(exif::Tag::Orientation, exif::In::PRIMARY)
+        .and_then(|f| f.value.get_uint(0))
+        .map(|v| v as u16)
+        .unwrap_or(1)
+}
+
 pub fn decode_to_dynamic(path: &Path) -> Result<DynamicImage, String> {
     let ext = path
         .extension()
@@ -43,15 +73,35 @@ pub fn decode_to_dynamic(path: &Path) -> Result<DynamicImage, String> {
     if is_raw_extension(&ext) {
         let raw = rawler::decode_file(path)
             .map_err(|e| format!("RAW decode failed: {e}"))?;
+        let orientation = orientation_to_exif(raw.orientation);
         let develop = RawDevelop::default();
         let intermediate = develop
             .develop_intermediate(&raw)
             .map_err(|e| format!("RAW develop failed: {e}"))?;
-        intermediate
+        let image = intermediate
             .to_dynamic_image()
-            .ok_or_else(|| "RAW developed to an unsupported pixel layout".to_string())
+            .ok_or_else(|| "RAW developed to an unsupported pixel layout".to_string())?;
+        Ok(apply_orientation(image, orientation))
     } else {
-        image::open(path).map_err(|e| format!("image open failed: {e}"))
+        let orientation = exif_orientation(path);
+        let image = image::open(path).map_err(|e| format!("image open failed: {e}"))?;
+        Ok(apply_orientation(image, orientation))
+    }
+}
+
+/// rawler's Orientation to the EXIF orientation number space.
+fn orientation_to_exif(o: rawler::Orientation) -> u16 {
+    use rawler::Orientation::*;
+    match o {
+        Normal => 1,
+        HorizontalFlip => 2,
+        Rotate180 => 3,
+        VerticalFlip => 4,
+        Transpose => 5,
+        Rotate90 => 6,
+        Transverse => 7,
+        Rotate270 => 8,
+        Unknown => 1,
     }
 }
 
@@ -60,6 +110,8 @@ pub fn decode_to_dynamic(path: &Path) -> Result<DynamicImage, String> {
 pub fn auto_correct_file(src: &Path, dst: &Path, quality: u8) -> Result<(u32, u32), String> {
     let decoded = decode_to_dynamic(src)?;
     let corrected = pipeline::auto_correct(&decoded);
+    let straightened = straighten::auto_straighten(&corrected.to_rgb32f());
+    let corrected = DynamicImage::ImageRgb32F(straightened);
     let (w, h) = corrected.dimensions();
     if w == 0 || h == 0 {
         return Err("decoded image is empty".to_string());
