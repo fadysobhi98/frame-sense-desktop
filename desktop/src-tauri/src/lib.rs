@@ -54,6 +54,7 @@ type FnAutoCorrectV2 = unsafe extern "C" fn(
     *const std::ffi::c_char,
 ) -> i32;
 #[allow(clippy::type_complexity)]
+type FnProbeLook = unsafe extern "C" fn(*const std::ffi::c_char) -> *mut std::ffi::c_char;
 type FnPreviewJpeg = unsafe extern "C" fn(
     *const std::ffi::c_char,
     u32,
@@ -72,6 +73,7 @@ struct RawEngine {
     auto_correct_look: Option<FnAutoCorrectLook>,
     auto_correct_v2: Option<FnAutoCorrectV2>,
     preview_jpeg: Option<FnPreviewJpeg>,
+    probe_look: Option<FnProbeLook>,
     last_error: FnLastError,
     free_string: FnFreeString,
     version: FnVersion,
@@ -141,12 +143,14 @@ fn load_engine() -> Result<RawEngine, String> {
             .get::<FnPreviewJpeg>(b"fs_raw_preview_jpeg\0")
             .ok()
             .map(|s| *s);
+        let probe_look = lib.get::<FnProbeLook>(b"fs_raw_probe_look\0").ok().map(|s| *s);
         Ok(RawEngine {
             _lib: lib,
             auto_correct,
             auto_correct_look,
             auto_correct_v2,
             preview_jpeg,
+            probe_look,
             last_error,
             free_string,
             version,
@@ -438,6 +442,96 @@ async fn auto_correct_camera(
     .map_err(|e| format!("processing failed to run: {e}"))?
 }
 
+/// Suggested session tone for a folder: probes up to 12 sample photos with
+/// the engine's deterministic brightness/colour heuristic and votes.
+#[derive(serde::Serialize)]
+struct ToneSuggestion {
+    tone: String,
+    reason: String,
+    probed: usize,
+}
+
+#[command]
+async fn suggest_session_tone(folder_path: String) -> Result<ToneSuggestion, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let engine = engine()?;
+        let probe = engine
+            .probe_look
+            .ok_or_else(|| "This engine build has no tone suggestion support.".to_string())?;
+        let root = PathBuf::from(&folder_path);
+        if !root.is_dir() {
+            return Err("folder not found".to_string());
+        }
+        let mut files: Vec<PathBuf> = walkdir::WalkDir::new(&root)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .map(|e| e.into_path())
+            .filter(|p| p.is_file() && core::is_supported_photo(p))
+            .collect();
+        files.sort();
+        if files.is_empty() {
+            return Err("no photos found in that folder".to_string());
+        }
+        let sample_n = 12usize.min(files.len());
+        let step = (files.len() / sample_n).max(1);
+        let mut votes = [0usize; 7];
+        let mut reasons: std::collections::HashMap<u8, String> = std::collections::HashMap::new();
+        let mut probed = 0usize;
+        for i in (0..files.len()).step_by(step).take(sample_n) {
+            let src_c = match CString::new(files[i].to_string_lossy().as_bytes()) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let ptr = unsafe { probe(src_c.as_ptr()) };
+            if ptr.is_null() {
+                continue;
+            }
+            let json = unsafe { engine_string(engine, ptr) };
+            let look = json
+                .split("\"look\":")
+                .nth(1)
+                .and_then(|t| t.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse::<u8>().ok())
+                .unwrap_or(1);
+            let reason = json
+                .split("\"reason\":\"")
+                .nth(1)
+                .and_then(|t| t.split('\"').next())
+                .unwrap_or("")
+                .to_string();
+            if (look as usize) < votes.len() {
+                votes[look as usize] += 1;
+                reasons.insert(look, reason);
+                probed += 1;
+            }
+        }
+        if probed == 0 {
+            return Err("could not probe any photos".to_string());
+        }
+        let best = votes
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, v)| *v)
+            .map(|(i, _)| i as u8)
+            .unwrap_or(1);
+        let tone = match best {
+            0 => "natural",
+            2 => "golden",
+            3 => "peach",
+            4 => "amber",
+            5 => "airy",
+            6 => "cinematic",
+            _ => "warm",
+        };
+        Ok(ToneSuggestion {
+            tone: tone.to_string(),
+            reason: reasons.get(&best).cloned().unwrap_or_default(),
+            probed,
+        })
+    })
+    .await
+    .map_err(|e| format!("tone suggestion failed to run: {e}"))?
+}
+
 /// Session preview on one photo: [baseline, chosen] as base64 JPEGs.
 /// Baseline is the Natural tone without retouch; chosen is the selected
 /// session tone, with face retouch when `retouch` is true.
@@ -504,6 +598,7 @@ pub fn run() {
             auto_correct_folder,
             set_processing_control,
             retouch_preview,
+            suggest_session_tone,
             raw_engine_status
         ])
         .run(tauri::generate_context!())

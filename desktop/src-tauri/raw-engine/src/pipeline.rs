@@ -488,6 +488,37 @@ pub fn local_tone_map(rgb: &mut Rgb32FImage, strength: f32) {
 }
 
 /// Collect luma samples (Rec.709) with stride sampling so huge files stay fast.
+/// Suggest a session tone from the photo's own brightness and colour.
+/// Deterministic heuristic (medians and channel means), honestly labelled
+/// as a suggestion in the UI - no AI scene recognition.
+pub fn suggest_look(rgb: &Rgb32FImage, has_people: bool) -> (Look, &'static str) {
+    let mut lumas = sample_lumas(rgb);
+    if lumas.is_empty() {
+        return (Look::Warm, "mixed-light photos");
+    }
+    lumas.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = lumas[lumas.len() / 2];
+    let stats = channel_stats(rgb);
+    let warm_deficit = stats.mean_b < stats.mean_r * 0.82;
+    if median < 0.26 {
+        if warm_deficit {
+            (Look::AmberIndoor, "dark photos in warm/tungsten light")
+        } else {
+            (Look::Cinematic, "dark, moody photos")
+        }
+    } else if median > 0.58 {
+        if has_people {
+            (Look::BrightAiry, "bright photos with people")
+        } else {
+            (Look::Natural, "bright, well-lit photos")
+        }
+    } else if has_people {
+        (Look::Warm, "photos with people in mixed light")
+    } else {
+        (Look::Warm, "mixed-light photos")
+    }
+}
+
 pub fn sample_lumas(rgb: &Rgb32FImage) -> Vec<f32> {
     let (w, h) = rgb.dimensions();
     let total = (w as usize) * (h as usize);

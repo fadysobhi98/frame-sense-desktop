@@ -378,6 +378,52 @@ pub extern "C" fn fs_raw_auto_correct_file_v2(
 /// Base64 JPEG preview (developed with look, optional retouch), small.
 /// Free with fs_raw_free_string. Null on failure (see fs_raw_last_error).
 #[no_mangle]
+/// Probe one photo and suggest a session tone. Returns a JSON string
+/// {"look":N,"reason":"..."} (caller frees via fs_raw_free_string), or
+/// null on error (fs_raw_last_error has the message).
+#[no_mangle]
+pub extern "C" fn fs_raw_probe_look(src: *const c_char) -> *mut c_char {
+    let run = || -> Result<String, String> {
+        let src = read_c_path(src, "source")?;
+        if !src.is_file() {
+            return Err(format!("source file not found: {}", src.display()));
+        }
+        let decoded = decode_to_dynamic(&src)?.to_rgb8();
+        let small = if decoded.width() > 1024 {
+            image::DynamicImage::ImageRgb8(decoded)
+                .resize(1024, 1024, image::imageops::FilterType::Triangle)
+                .to_rgb8()
+        } else {
+            decoded
+        };
+        let rgb32 = image::DynamicImage::ImageRgb8(small).to_rgb32f();
+        // cheap people hint: warm skin-tone share, no face model needed
+        let stats = pipeline::channel_stats(&rgb32);
+        let has_people = stats.skin_hue_median.is_some();
+        let (look, reason) = pipeline::suggest_look(&rgb32, has_people);
+        let code = match look {
+            pipeline::Look::Natural => 0,
+            pipeline::Look::Warm => 1,
+            pipeline::Look::Golden => 2,
+            pipeline::Look::PeachGold => 3,
+            pipeline::Look::AmberIndoor => 4,
+            pipeline::Look::BrightAiry => 5,
+            pipeline::Look::Cinematic => 6,
+        };
+        Ok(format!("{{\"look\":{code},\"reason\":\"{reason}\"}}"))
+    };
+    match run() {
+        Ok(j) => match CString::new(j) {
+            Ok(c) => c.into_raw(),
+            Err(_) => std::ptr::null_mut(),
+        },
+        Err(e) => {
+            set_last_error(e);
+            std::ptr::null_mut()
+        }
+    }
+}
+
 pub extern "C" fn fs_raw_preview_jpeg(
     src: *const c_char,
     max_dim: u32,

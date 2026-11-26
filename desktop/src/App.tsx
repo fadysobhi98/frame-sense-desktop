@@ -109,6 +109,8 @@ function App() {
     { id: "cinematic", label: "Cinematic", hint: "Film look: faded blacks, creamy highlights" },
   ];
   const [bw, setBw] = useState(true);
+  const [toneSuggestion, setToneSuggestion] = useState<{ tone: string; reason: string; probed: number } | null>(null);
+  const [toneSuggestBusy, setToneSuggestBusy] = useState(false);
   const [retouch, setRetouch] = useState(false);
   const [previewBusy, setPreviewBusy] = useState(false);
   const [preview, setPreview] = useState<{ before: string; after: string; name: string; path: string } | null>(null);
@@ -121,6 +123,16 @@ function App() {
 useEffect(() => {
   invoke<RawEngineStatus>("raw_engine_status").then(setEngineStatus).catch(() => setEngineStatus(null));
 }, []);
+
+useEffect(() => {
+  setToneSuggestion(null);
+  if (!folderSource) return;
+  setToneSuggestBusy(true);
+  invoke<{ tone: string; reason: string; probed: number }>("suggest_session_tone", { folderPath: folderSource })
+    .then(setToneSuggestion)
+    .catch(() => setToneSuggestion(null))
+    .finally(() => setToneSuggestBusy(false));
+}, [folderSource]);
 const [isFullscreen, setIsFullscreen] = useState(false);
 
 useEffect(() => {
@@ -490,6 +502,25 @@ const toggleFullscreen = async () => {
                     </button>
                   )}
                 </div>
+                {toneSuggestBusy && !toneSuggestion && (
+                  <div className="field-note">Looking at your photos to suggest a session tone...</div>
+                )}
+                {toneSuggestion && (
+                  <div className="field-note" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <span>
+                      Suggested tone for this folder: <strong>{TONES.find((t) => t.id === toneSuggestion.tone)?.label ?? toneSuggestion.tone}</strong>
+                      {toneSuggestion.reason ? ` - ${toneSuggestion.reason}` : ""}
+                    </span>
+                    {toneSuggestion.tone !== look ? (
+                      <button type="button" className="secondary-button" onClick={() => setLook(toneSuggestion.tone)}>Apply</button>
+                    ) : (
+                      <span>(already selected)</span>
+                    )}
+                    <button type="button" className="icon-button" title="Dismiss suggestion" onClick={() => setToneSuggestion(null)}>
+                      <XCircle size={16} />
+                    </button>
+                  </div>
+                )}
                 <label>Session tone: <select value={look} onChange={(e) => setLook(e.target.value)}>
                   {TONES.map((t) => <option key={t.id} value={t.id}>{t.label}{t.id === "warm" ? " (default)" : ""}</option>)}
                 </select></label>
