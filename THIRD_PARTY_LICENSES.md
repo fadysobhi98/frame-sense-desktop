@@ -14,3 +14,10 @@ rawler's own source is available at the link above and on crates.io.
 
 All other dependencies are MIT / Apache-2.0 / BSD licensed Rust and npm
 crates; see Cargo.toml and package.json.
+
+## SeetaFace frontal face-detection model (seeta_fd_frontal_v1.0.bin)
+
+Bundled in desktop/src-tauri/models/ and compiled into the app. From the
+SeetaFace Engine project (SeetaTech), BSD-2-Clause license, loaded through
+the rustface crate (BSD-2-Clause). Used only for local on-device face
+counting; no image ever leaves the user's machine.

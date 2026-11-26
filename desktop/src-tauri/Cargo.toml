@@ -1,6 +1,6 @@
 [package]
 name = "framesense_desktop"
-version = "0.3.0"
+version = "0.4.0"
 description = "Frame Sense Desktop foundation"
 authors = ["Frame Sense"]
 edition = "2021"
@@ -23,3 +23,5 @@ sha2 = "0.10"
 hex = "0.4"
 walkdir = "2"
 uuid = { version = "1", features = ["v4"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+rustface = "0.1"

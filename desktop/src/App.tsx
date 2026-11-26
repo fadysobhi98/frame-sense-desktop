@@ -43,6 +43,7 @@ type AutoCorrectReport = {
   failed: { file: string; error: string }[];
   output_dir: string;
   stopped: boolean;
+  counts: { regular: number; couple: number; group: number; rejected: number };
 };
 
 type RawEngineStatus = {
@@ -162,7 +163,8 @@ const toggleFullscreen = async () => {
     if (report.total === 0) {
       setMessage("Found 0 photos in that folder. The app looks for RAW and JPEG photos, including inside subfolders.");
     } else {
-      setMessage(`Auto-correction finished: ${report.processed} corrected, ${report.already_done} already done, ${report.failed.length} failed.`);
+      const c = report.counts;
+      setMessage(`Auto-correction finished: ${report.processed} corrected and sorted (${c.regular} regular, ${c.couple} couple, ${c.group} group, ${c.rejected} rejected), ${report.already_done} already done, ${report.failed.length} failed.`);
     }
   }
 
@@ -488,13 +490,15 @@ const toggleFullscreen = async () => {
                     <span>Corrected: {acReport.processed}</span>
                     <span>Already done (skipped): {acReport.already_done}</span>
                     <span>Failed: {acReport.failed.length}</span>
+                    {acReport.processed > 0 && <span>Sorted: {acReport.counts.regular} regular, {acReport.counts.couple} couple, {acReport.counts.group} group, {acReport.counts.rejected} rejected</span>}
+                    {acReport.counts.rejected > 0 && <small>Rejected photos are copies in the Rejected folder for you to review. Nothing is ever deleted and originals are never touched.</small>}
                     {acReport.total > 0 && <small>{acReport.output_dir}</small>}
                     {acReport.failed.slice(0, 5).map((f) => (
                       <small key={f.file}>{f.file}: {f.error}</small>
                     ))}
                   </div>
                 )}
-                <p className="field-note">Automatic exposure and contrast only. It does not smooth skin, remove objects or restyle the photo. Re-running skips photos that already have a corrected copy.</p>
+                <p className="field-note">Corrects each photo (exposure, white balance, warm natural skin, straightening) and sorts the copies into Regular / Couple / Group / Rejected subfolders inside the output folder. It does not smooth skin, remove objects or restyle the photo. Originals are never moved, deleted or modified. Re-running skips photos that already have a corrected copy.</p>
               </section>
 
               <section className="panel">
@@ -531,7 +535,7 @@ const toggleFullscreen = async () => {
           <footer className="content-footer">
             <span><ShieldCheck size={14}/> Local-first by design</span>
             <span><CircleHelp size={14}/> Starter scaffold · not a finished product</span>
-            <span><Command size={14}/> v0.3.0</span>
+            <span><Command size={14}/> v0.4.0</span>
           </footer>
         </div>
       </main>

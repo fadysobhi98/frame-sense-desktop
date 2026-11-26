@@ -1,3 +1,4 @@
+mod classify;
 mod core;
 
 use std::ffi::CString;
@@ -226,6 +227,7 @@ fn auto_correct_folder(
             let _ = on_progress.send(p);
         },
         &processing_control,
+        &classify::classify_output,
     )
 }
 
@@ -251,6 +253,7 @@ fn auto_correct_camera(
             let _ = on_progress.send(p);
         },
         &processing_control,
+        &classify::classify_output,
     )
 }
 
