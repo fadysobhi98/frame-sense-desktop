@@ -6,6 +6,7 @@
 //! framesense_raw.dll at runtime; also usable as a plain Rust crate.
 
 pub mod denoise;
+pub mod lut3;
 pub mod pipeline;
 pub mod retouch;
 pub mod straighten;
@@ -603,4 +604,19 @@ mod tests {
 #[no_mangle]
 pub extern "C" fn fs_raw_set_adjust(contrast: f32, brightness: f32, warmth: f32, fade: f32, saturation: f32) {
     pipeline::set_adjust([contrast, brightness, warmth, fade, saturation]);
+}
+
+/// Optional AI look (3D LUT network). enabled 0/1, strength 0..1.
+#[no_mangle]
+pub extern "C" fn fs_raw_set_ai_look(enabled: u8, strength: f32, ort_lib: *const c_char, model_dir: *const c_char) {
+    if ort_lib.is_null() || model_dir.is_null() {
+        return;
+    }
+    let (o, m) = unsafe {
+        (
+            std::ffi::CStr::from_ptr(ort_lib).to_string_lossy().into_owned(),
+            std::ffi::CStr::from_ptr(model_dir).to_string_lossy().into_owned(),
+        )
+    };
+    lut3::configure(enabled != 0, strength, o.into(), m.into());
 }

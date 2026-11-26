@@ -139,6 +139,11 @@ function App() {
   useEffect(() => {
     invoke("set_adjust", { contrast: adj.contrast, brightness: adj.brightness, warmth: adj.warmth, fade: adj.fade, saturation: adj.saturation }).catch(() => {});
   }, [adj]);
+  const [aiLook, setAiLook] = useState(false);
+  const [aiStrength, setAiStrength] = useState(0.5);
+  useEffect(() => {
+    invoke("set_ai_look", { enabled: aiLook, strength: aiStrength }).catch(() => {});
+  }, [aiLook, aiStrength]);
   const [bw, setBw] = useState(true);
   const [toneSuggestion, setToneSuggestion] = useState<{ tone: string; reason: string; probed: number } | null>(null);
   const [toneSuggestBusy, setToneSuggestBusy] = useState(false);
@@ -570,6 +575,17 @@ const toggleFullscreen = async () => {
                 {preview?.path && (
                   <button type="button" className="secondary-button" disabled={previewBusy} onClick={() => previewTone(look)}>Update preview with sliders</button>
                 )}
+                <label title="Optional. Off by default.">
+                  <input type="checkbox" checked={aiLook} onChange={(e) => setAiLook(e.target.checked)}/> Auto AI look (3D LUT model), optional, off by default
+                </label>
+                {aiLook && (
+                  <label>AI look strength: {aiStrength.toFixed(2)}
+                    <input type="range" min={0.1} max={1} step={0.05} value={aiStrength} onChange={(e) => setAiStrength(Number(e.target.value))}/>
+                  </label>
+                )}
+                <div className="field-note">
+                  Auto AI look uses a real small neural network (Image-Adaptive 3D LUT, code Apache-2.0) that runs offline on your PC. Its weights were trained on research-only data (MIT-Adobe FiveK), so it is for Fady's own personal wedding work only: not for sale, and this app must never be redistributed. In our tests it gives a more saturated, contrasty look and is not always better, so compare with the preview and keep it off if the photo looks worse. Everything else in Auto (exposure, highlights, white balance, skin tone, noise reduction) is rule-based maths, not AI.
+                </div>
                 <label>JPEG quality: {quality}<input type="range" min={50} max={100} value={quality} onChange={(e) => setQuality(Number(e.target.value))}/></label>
                 <label><input type="checkbox" checked={bw} onChange={(e) => setBw(e.target.checked)}/> Also export a B&W folder</label>
                 <label title="Finds faces with a local AI model, then whitens teeth and sharpens skin texture. No smoothing, nothing leaves your PC.">
@@ -703,7 +719,7 @@ const toggleFullscreen = async () => {
           <footer className="content-footer">
             <span><ShieldCheck size={14}/> Local-first by design</span>
             <span><CircleHelp size={14}/> Everything runs on this PC - originals are never changed</span>
-            <span><Command size={14}/> v0.6.9</span>
+            <span><Command size={14}/> v0.6.10</span>
           </footer>
         </div>
       </main>

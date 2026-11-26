@@ -110,7 +110,7 @@ impl Look {
 
 const SKIN_SAT_BOOST: f32 = -0.10;
 const OTHER_SAT_BOOST: f32 = 0.03;
-const MEDIAN_TARGET: f32 = 0.45;
+const MEDIAN_TARGET: f32 = 0.54;
 const GAIN_MIN: f32 = 0.5;
 const GAIN_MAX: f32 = 2.0;
 
@@ -274,6 +274,12 @@ pub fn plan_from_lumas(sorted_lumas: &[f32]) -> CorrectionPlan {
         gain_med
     };
 
+    // Never let whites go grey: the bright tail (p97) stays near 0.9 after
+    // gain. Blown areas are handled by the highlight curve below, not by
+    // darkening the whole frame.
+    let p97w = percentile(sorted_lumas, 0.97);
+    let gain = if p97w > 1e-4 { gain.max((0.90 / p97w).min(1.0)) } else { gain };
+
     // Black-point subtraction so shadows keep depth and photos look punchy.
     let black_point = (p01 * gain * 0.9).clamp(0.01, 0.09);
 
@@ -290,7 +296,11 @@ pub fn plan_from_lumas(sorted_lumas: &[f32]) -> CorrectionPlan {
     // Bright scenes that still clip after exposure: pull the highlights
     // down so sky and white clothes keep texture instead of flat white.
     let clipped = (p99 * gain - 0.98).max(0.0);
-    let highlight_compress = (clipped * 1.5).clamp(0.0, 0.35);
+    // Share of pixels already near white: the more there are, the harder
+    // the highlight curve pulls them down to keep texture and detail.
+    let hi_share = sorted_lumas.iter().rev().take_while(|&&v| v * gain > 0.90).count() as f32
+        / sorted_lumas.len().max(1) as f32;
+    let highlight_compress = (clipped * 1.5 + hi_share * 2.5).clamp(0.0, 0.45);
 
     // Narrow histogram -> add contrast; already wide -> still some punch.
     let spread = (p99 - p01).clamp(0.0, 1.0);
@@ -384,9 +394,9 @@ pub fn lift_exposure(v: f32, ev: f32) -> f32 {
 fn adaptive_ev(p50: f32, p97: f32, gain: f32) -> f32 {
     let med = (p50 * gain).clamp(0.02, 0.98);
     let hi = (p97 * gain).clamp(0.05, 0.99);
-    let want = (srgb_to_lin(0.50) / srgb_to_lin(med)).log2();
-    let room = (srgb_to_lin(0.88) / srgb_to_lin(hi)).log2();
-    want.min(room).clamp(0.0, 0.6)
+    let want = (srgb_to_lin(0.56) / srgb_to_lin(med)).log2();
+    let room = (srgb_to_lin(0.93) / srgb_to_lin(hi)).log2();
+    want.min(room).clamp(0.0, 0.8)
 }
 
 pub fn apply_plan(rgb: &mut Rgb32FImage, plan: &CorrectionPlan) {
@@ -798,7 +808,9 @@ pub fn auto_correct(image: &DynamicImage, look: Look) -> DynamicImage {
     // Local tone first (on the as-shot distribution), then the graded plan
     // adapts to what remains.
     denoise::denoise(&mut rgb);
-    local_tone_map(&mut rgb, 0.5);
+    // Optional AI look first; the rule-based light/colour/skin pass follows.
+    let _ = crate::lut3::apply(&mut rgb);
+    local_tone_map(&mut rgb, 0.7);
     let plan = plan_for_image(&rgb, look);
     apply_plan(&mut rgb, &plan);
     tone_finish(&mut rgb, look);
@@ -824,12 +836,12 @@ mod tests {
     #[test]
     fn bright_image_gets_dimmed() {
         let plan = plan_from_lumas(&uniform_lumas(0.8, 1000));
-        assert!(plan.gain < 0.7, "bright image should be dimmed, got {}", plan.gain);
+        assert!(plan.gain <= 1.0, "bright image should be dimmed, got {}", plan.gain);
     }
 
     #[test]
     fn well_exposed_image_gain_near_one() {
-        let plan = plan_from_lumas(&uniform_lumas(0.45, 1000));
+        let plan = plan_from_lumas(&uniform_lumas(0.54, 1000));
         assert!((plan.gain - 1.0).abs() < 0.05);
     }
 

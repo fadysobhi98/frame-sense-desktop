@@ -63,7 +63,7 @@ fn detect_faces(
 static ORT_ENV: OnceLock<Result<ort::environment::Environment, String>> = OnceLock::new();
 static ORT_INIT_MSG: Mutex<()> = Mutex::new(());
 
-fn ort_env(ort_lib: &Path) -> Result<&'static ort::environment::Environment, String> {
+pub(crate) fn ort_env(ort_lib: &Path) -> Result<&'static ort::environment::Environment, String> {
     // Serialize the (one-time) init so two threads never race it.
     let _guard = ORT_INIT_MSG.lock().map_err(|_| "ort init lock".to_string())?;
     let res = ORT_ENV.get_or_init(|| {

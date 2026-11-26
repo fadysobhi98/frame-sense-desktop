@@ -65,6 +65,7 @@ type FnPreviewJpeg = unsafe extern "C" fn(
     *const std::ffi::c_char,
 ) -> *mut std::ffi::c_char;
 type FnSetAdjust = unsafe extern "C" fn(f32, f32, f32, f32, f32);
+type FnSetAiLook = unsafe extern "C" fn(u8, f32, *const std::ffi::c_char, *const std::ffi::c_char);
 type FnLastError = unsafe extern "C" fn() -> *mut std::ffi::c_char;
 type FnFreeString = unsafe extern "C" fn(*mut std::ffi::c_char);
 type FnVersion = unsafe extern "C" fn() -> *mut std::ffi::c_char;
@@ -78,6 +79,7 @@ struct RawEngine {
     probe_look: Option<FnProbeLook>,
     eyes_closed: Option<FnEyesClosed>,
     set_adjust: Option<FnSetAdjust>,
+    set_ai_look: Option<FnSetAiLook>,
     last_error: FnLastError,
     free_string: FnFreeString,
     version: FnVersion,
@@ -150,9 +152,12 @@ fn load_engine() -> Result<RawEngine, String> {
         let probe_look = lib.get::<FnProbeLook>(b"fs_raw_probe_look\0").ok().map(|s| *s);
         let eyes_closed = lib.get::<FnEyesClosed>(b"fs_raw_eyes_closed\0").ok().map(|s| *s);
         let set_adjust = lib.get::<FnSetAdjust>(b"fs_raw_set_adjust\0").ok().map(|s| *s);
+        let set_ai_look = lib.get::<FnSetAiLook>(b"fs_raw_set_ai_look\0").ok().map(|s| *s);
         Ok(RawEngine {
             _lib: lib,
             set_adjust,
+            set_ai_look,
+            set_ai_look,
             auto_correct,
             auto_correct_look,
             auto_correct_v2,
@@ -409,6 +414,22 @@ fn set_adjust(contrast: f32, brightness: f32, warmth: f32, fade: f32, saturation
     if let Some(f) = e.set_adjust {
         unsafe { f(contrast, brightness, warmth, fade, saturation) };
     }
+    Ok(())
+}
+
+/// Optional AI look (3D LUT network, research-licensed weights). Off by default.
+#[command]
+fn set_ai_look(enabled: bool, strength: f32) -> Result<(), String> {
+    let e = engine()?;
+    let f = e.set_ai_look.ok_or_else(|| "This engine build has no AI look.".to_string())?;
+    let dir = engine_dir()?.join("models");
+    if enabled && !(dir.join("lut3_classifier.onnx").is_file() && dir.join("lut3_luts.bin").is_file()) {
+        return Err("The AI look model files are missing next to the app.".to_string());
+    }
+    let ort = ort_library_path()?;
+    let o = CString::new(ort.to_string_lossy().as_bytes()).map_err(|_| "bad path".to_string())?;
+    let m = CString::new(dir.to_string_lossy().as_bytes()).map_err(|_| "bad path".to_string())?;
+    unsafe { f(if enabled { 1 } else { 0 }, strength, o.as_ptr(), m.as_ptr()) };
     Ok(())
 }
 
