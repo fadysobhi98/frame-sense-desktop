@@ -457,6 +457,7 @@ pub extern "C" fn fs_raw_probe_look(src: *const c_char) -> *mut c_char {
             pipeline::Look::Cinematic => 6,
             pipeline::Look::Cool => 7,
             pipeline::Look::Punchy => 8,
+            pipeline::Look::Auto => 9,
         };
         Ok(format!("{{\"look\":{code},\"reason\":\"{reason}\"}}"))
     };

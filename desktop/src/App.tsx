@@ -98,10 +98,11 @@ function App() {
   const [folderSource, setFolderSource] = useState("");
   const [outputDir, setOutputDir] = useState("");
   const [quality, setQuality] = useState(90);
-  const [look, setLook] = useState("warm");
+  const [look, setLook] = useState("auto");
   const TONES: { id: string; label: string; hint: string }[] = [
+    { id: "auto", label: "Auto (each photo on its own)", hint: "Default. Every photo is analysed and corrected separately: exposure, light, colour, skin. No preset look." },
     { id: "natural", label: "Natural", hint: "True-to-life colours, no warm tint" },
-    { id: "warm", label: "Warm Golden", hint: "Gentle golden warmth, the default" },
+    { id: "warm", label: "Warm Golden", hint: "Gentle golden warmth, same for every photo" },
     { id: "golden", label: "Golden+", hint: "Strong orange-gold glow" },
     { id: "peach", label: "Peach-Gold", hint: "Soft pink-peach glow, creamy highlights" },
     { id: "amber", label: "Amber Indoor", hint: "Deep amber, warm shadows too" },
@@ -524,7 +525,7 @@ const toggleFullscreen = async () => {
                   </div>
                 )}
                 <label>Session tone: <select value={look} onChange={(e) => setLook(e.target.value)}>
-                  {TONES.map((t) => <option key={t.id} value={t.id}>{t.label}{t.id === "warm" ? " (default)" : ""}</option>)}
+                  {TONES.map((t) => <option key={t.id} value={t.id}>{t.label}{t.id === "auto" ? " (default)" : ""}</option>)}
                 </select></label>
                 <div className="field-note">
                   {TONES.find((t) => t.id === look)?.hint}
@@ -545,7 +546,7 @@ const toggleFullscreen = async () => {
                 {preview && (
                   <div className="import-summary">
                     <strong>Session preview: {preview.name}</strong>
-                    <div className="field-note">Pick a session tone to see it on this photo:</div>
+                    <div className="field-note">Optional: pick a session tone to see it on this photo:</div>
                     <div style={{ display: "flex", gap: 6, flexWrap: "wrap", margin: "6px 0" }}>
                       {TONES.map((t) => (
                         <button
@@ -665,7 +666,7 @@ const toggleFullscreen = async () => {
           <footer className="content-footer">
             <span><ShieldCheck size={14}/> Local-first by design</span>
             <span><CircleHelp size={14}/> Everything runs on this PC - originals are never changed</span>
-            <span><Command size={14}/> v0.6.7</span>
+            <span><Command size={14}/> v0.6.8</span>
           </footer>
         </div>
       </main>

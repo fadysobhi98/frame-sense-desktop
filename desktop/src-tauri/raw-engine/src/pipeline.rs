@@ -21,6 +21,8 @@ pub enum Look {
     Cinematic,
     Cool,
     Punchy,
+    /// Per-photo automatic correction, no preset grade.
+    Auto,
 }
 
 /// Grade parameters behind a session tone.
@@ -56,11 +58,12 @@ impl Look {
             6 => Look::Cinematic,
             7 => Look::Cool,
             8 => Look::Punchy,
+            9 => Look::Auto,
             _ => Look::Warm,
         }
     }
     /// All session tones, in menu order.
-    pub fn all() -> [Look; 9] {
+    pub fn all() -> [Look; 10] {
         [
             Look::Natural,
             Look::Warm,
@@ -71,6 +74,7 @@ impl Look {
             Look::Cinematic,
             Look::Cool,
             Look::Punchy,
+            Look::Auto,
         ]
     }
     fn params(self) -> LookParams {
@@ -94,6 +98,7 @@ impl Look {
             Look::BrightAiry => LookParams { warmth: 0.5, split: 0.6, black_floor: 0.04, cream: 0.8, contrast_bias: -0.05, ..BASE },
             Look::Cinematic => LookParams { warmth: 0.4, split: 0.8, black_floor: 0.10, cream: 1.0, contrast_bias: -0.06, ..BASE },
             Look::Cool => LookParams { warmth: 0.0, ..BASE },
+            Look::Auto => LookParams { warmth: 1.0, saturation_boost: 0.03, ..BASE },
             Look::Punchy => LookParams { warmth: 0.5, saturation_boost: 0.25, contrast_bias: 0.15, ..BASE },
         }
     }
@@ -317,6 +322,14 @@ pub fn plan_for_image(rgb: &Rgb32FImage, look: Look) -> CorrectionPlan {
     plan.wb = white_balance_gains(&stats);
     let lp = look.params();
     plan.warmth = lp.warmth;
+    if look == Look::Auto {
+        // Per-photo warmth: cool/neutral photos get more golden warmth,
+        // photos that are already warm get less, so each photo is judged
+        // on its own colour balance.
+        let rb = stats.mean_r / stats.mean_b.max(1e-3);
+        let t = ((rb - 1.0) / 0.4).clamp(0.0, 1.0);
+        plan.warmth = 1.7 - 1.2 * t;
+    }
     plan.split = lp.split;
     plan.split_shadow = lp.split_shadow;
     plan.tint_r = lp.tint_r;
