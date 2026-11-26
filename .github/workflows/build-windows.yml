@@ -26,11 +26,7 @@ jobs:
         working-directory: desktop
         run: npm ci
 
-      - name: Run core tests (project creation, safe import, auto-correction logic)
-        working-directory: desktop/src-tauri
-        run: cargo test
-
-      - name: Test and build the RAW engine DLL
+      - name: Test and build the RAW engine DLL (must exist before the app build: it is a bundled resource)
         working-directory: desktop/src-tauri/raw-engine
         run: |
           cargo test
@@ -38,6 +34,10 @@ jobs:
 
       - name: Stage RAW engine DLL for bundling
         run: Copy-Item desktop/src-tauri/raw-engine/target/release/framesense_raw.dll desktop/src-tauri/framesense_raw.dll
+
+      - name: Run core tests (project creation, safe import, auto-correction logic)
+        working-directory: desktop/src-tauri
+        run: cargo test
 
       - name: Build the app and create a GitHub Release with the installer
         uses: tauri-apps/tauri-action@v0
