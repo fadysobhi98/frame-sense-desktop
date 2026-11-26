@@ -247,9 +247,6 @@ fn engine_correct_look_v2(
     look: u8,
     retouch: bool,
 ) -> Result<(), String> {
-    if !retouch {
-        return engine_correct_look(src, dst, quality, look);
-    }
     let engine = engine()?;
     let v2 = match engine.auto_correct_v2 {
         Some(f) => f,
@@ -259,9 +256,25 @@ fn engine_correct_look_v2(
         .map_err(|_| "source path is not representable".to_string())?;
     let dst_c = CString::new(dst.to_string_lossy().as_bytes())
         .map_err(|_| "destination path is not representable".to_string())?;
-    let ort_c = CString::new(ort_library_path()?.to_string_lossy().as_bytes())
-        .map_err(|_| "onnxruntime path is not representable".to_string())?;
-    let models_c = CString::new(face_model_dir()?.to_string_lossy().as_bytes())
+    // Models are needed for retouch AND for auto-upright (face-based
+    // rotation fix). Without retouch, missing models just skip upright.
+    let models_dir = match face_model_dir() {
+        Ok(d) => Some(d),
+        Err(e) if retouch => return Err(e),
+        Err(_) => None,
+    };
+    if !retouch && models_dir.is_none() {
+        return engine_correct_look(src, dst, quality, look);
+    }
+    let ort_c = if retouch {
+        Some(
+            CString::new(ort_library_path()?.to_string_lossy().as_bytes())
+                .map_err(|_| "onnxruntime path is not representable".to_string())?,
+        )
+    } else {
+        None
+    };
+    let models_c = CString::new(models_dir.unwrap().to_string_lossy().as_bytes())
         .map_err(|_| "model path is not representable".to_string())?;
     let code = unsafe {
         v2(
@@ -269,8 +282,8 @@ fn engine_correct_look_v2(
             dst_c.as_ptr(),
             quality,
             look,
-            1,
-            ort_c.as_ptr(),
+            if retouch { 1 } else { 0 },
+            ort_c.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
             models_c.as_ptr(),
         )
     };
@@ -561,7 +574,11 @@ async fn retouch_preview(
                     Some(CString::new(face_model_dir()?.to_string_lossy().as_bytes()).map_err(|_| "model path is not representable".to_string())?),
                 )
             } else {
-                (None, None)
+                // models still passed (when present) for auto-upright
+                let m = face_model_dir()
+                    .ok()
+                    .and_then(|d| CString::new(d.to_string_lossy().as_bytes()).ok());
+                (None, m)
             };
             let ptr = unsafe {
                 preview(

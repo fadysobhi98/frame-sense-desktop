@@ -322,6 +322,20 @@ fn smoothstep(x: f32) -> f32 {
     x * x * (3.0 - 2.0 * x)
 }
 
+/// Exposure boost (default +1 EV) applied to an sRGB-encoded value in linear
+/// light, with a soft knee above 0.6 (linear) so highlights roll off.
+pub const EXPOSURE_EV: f32 = 1.0;
+pub fn plus_one_stop(v: f32) -> f32 {
+    let lin = if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+    let mut y = lin * EXPOSURE_EV.exp2();
+    let knee = 0.6f32;
+    if y > knee {
+        y = knee + (1.0 - knee) * (1.0 - (-(y - knee) / (1.0 - knee)).exp());
+    }
+    let y = y.clamp(0.0, 1.0);
+    if y <= 0.0031308 { y * 12.92 } else { 1.055 * y.powf(1.0 / 2.4) - 0.055 }
+}
+
 pub fn apply_plan(rgb: &mut Rgb32FImage, plan: &CorrectionPlan) {
     for pixel in rgb.pixels_mut() {
         let [r0, g0, b0] = pixel.0;
@@ -392,7 +406,9 @@ pub fn apply_plan(rgb: &mut Rgb32FImage, plan: &CorrectionPlan) {
                 x = sh + sw * (1.0 - (-(x - sh) / sw).exp());
             }
             let curved = x + plan.contrast_mix * (smoothstep(x) - x);
-            *channel = curved.clamp(0.0, 1.0);
+            // +1 stop of exposure in linear light with a soft highlight
+            // shoulder, so skin and whites brighten without hard clipping.
+            *channel = plus_one_stop(curved.clamp(0.0, 1.0));
         }
     }
 }

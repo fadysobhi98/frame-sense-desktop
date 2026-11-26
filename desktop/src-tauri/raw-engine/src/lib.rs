@@ -162,7 +162,10 @@ pub fn auto_correct_file_v2(
     ort_lib: Option<&Path>,
     model_dir: Option<&Path>,
 ) -> Result<(u32, u32), String> {
-    let decoded = decode_to_dynamic(src)?;
+    let mut decoded = decode_to_dynamic(src)?;
+    if let Some(md) = model_dir {
+        decoded = retouch::auto_upright(decoded, md).0;
+    }
     let corrected = pipeline::auto_correct(&decoded, look);
     let straightened = straighten::auto_straighten(&corrected.to_rgb32f());
     let corrected = DynamicImage::ImageRgb32F(straightened);
@@ -208,7 +211,10 @@ pub fn preview_jpeg_base64(
     ort_lib: Option<&Path>,
     model_dir: Option<&Path>,
 ) -> Result<String, String> {
-    let decoded = decode_to_dynamic(src)?;
+    let mut decoded = decode_to_dynamic(src)?;
+    if let Some(md) = model_dir {
+        decoded = retouch::auto_upright(decoded, md).0;
+    }
     let corrected = pipeline::auto_correct(&decoded, look);
     let straightened = straighten::auto_straighten(&corrected.to_rgb32f());
     let corrected = DynamicImage::ImageRgb32F(straightened);

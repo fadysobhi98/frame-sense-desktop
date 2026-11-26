@@ -38,6 +38,8 @@ fn detect_faces(
     gray: &[u8],
     w: u32,
     h: u32,
+    min_size: u32,
+    min_score: f64,
 ) -> Result<Vec<rustface::FaceInfo>, String> {
     let model_str = model.to_string_lossy().into_owned();
     DETECTOR.with(|det| {
@@ -48,12 +50,12 @@ fn detect_faces(
             *slot = Some(d);
         }
         let detector = slot.as_mut().unwrap();
-        detector.set_min_face_size(48);
+        detector.set_min_face_size(min_size);
         let image_data = rustface::ImageData::new(gray, w, h);
         Ok(detector
             .detect(&image_data)
             .into_iter()
-            .filter(|f| f.score() >= 3.0)
+            .filter(|f| f.score() >= min_score)
             .collect())
     })
 }
@@ -188,22 +190,22 @@ fn retouch_face(
             let mx = r.max(g).max(b);
             let mn = r.min(g).min(b);
             let sat = if mx > 1e-5 { (mx - mn) / mx } else { 0.0 };
-            let t_sat = ((0.55 - sat) / 0.40).clamp(0.0, 1.0);
-            let t_val = ((mx - 0.12) / 0.18).clamp(0.0, 1.0);
+            let t_sat = ((0.65 - sat) / 0.40).clamp(0.0, 1.0);
+            let t_val = ((mx - 0.06) / 0.14).clamp(0.0, 1.0);
             let wgt = m * t_sat * t_val;
             if wgt < 0.01 {
                 continue;
             }
-            let desat = 0.55 * wgt;
+            let desat = 0.75 * wgt;
             let dr = r + (mx - r) * desat;
             let dg = g + (mx - g) * desat;
             let db = b + (mx - b) * desat;
-            let lift = 0.30 * wgt;
+            let lift = 0.50 * wgt;
             let lift_px = |v: f32| v + lift * (1.0 - v) * (1.0 - v);
             let nr = lift_px(dr).clamp(0.0, 1.0);
             let ng = lift_px(dg).clamp(0.0, 1.0);
             let nb = lift_px(db).clamp(0.0, 1.0);
-            let blend = 0.85;
+            let blend = 0.95;
             img.put_pixel(
                 x,
                 y,
@@ -577,7 +579,7 @@ pub fn retouch_image(img: &mut RgbImage, ort_lib: &Path, model_dir: &Path) -> Re
     let gray = image::DynamicImage::ImageRgb8(img.clone()).to_luma8();
     let (gw, gh) = gray.dimensions();
     let det_path: PathBuf = model_dir.join("seeta_fd_frontal_v1.0.bin");
-    let faces = detect_faces(&det_path, gray.as_raw(), gw, gh)?;
+    let faces = detect_faces(&det_path, gray.as_raw(), gw, gh, 32, 2.5)?;
     if faces.is_empty() {
         return Ok(0);
     }
@@ -658,4 +660,50 @@ mod tests {
         assert!(!is_skin(&Rgb([30u8, 200, 60])));
         assert!(!is_skin(&Rgb([200u8, 220, 245])));
     }
+}
+
+/// Content-based "make it upright": when the photo has no detectable face
+/// as-is but does when turned 90/180/270 degrees, turn it. Used for files
+/// whose camera orientation tag is missing or wrong. Faces are found with
+/// the local SeetaFace detector (a model, not AI generation). Photos with no
+/// detectable faces are left exactly as decoded. Returns (image, degrees).
+pub fn auto_upright(img: image::DynamicImage, model_dir: &Path) -> (image::DynamicImage, u32) {
+    let det_path: PathBuf = model_dir.join("seeta_fd_frontal_v1.0.bin");
+    if !det_path.is_file() {
+        return (img, 0);
+    }
+    let small = img.resize(720, 720, image::imageops::FilterType::Triangle);
+    let score = |d: &image::DynamicImage| -> f64 {
+        let g = d.to_luma8();
+        let (w, h) = g.dimensions();
+        match detect_faces(&det_path, g.as_raw(), w, h, 20, 3.0) {
+            Ok(f) => f.iter().map(|x| x.score()).sum(),
+            Err(_) => 0.0,
+        }
+    };
+    let s0 = score(&small);
+    if s0 >= 3.0 {
+        return (img, 0);
+    }
+    let cands = [
+        (90u32, small.rotate90()),
+        (180u32, small.rotate180()),
+        (270u32, small.rotate270()),
+    ];
+    let mut best = (0u32, 0.0f64);
+    for (deg, d) in cands.iter() {
+        let sc = score(d);
+        if sc > best.1 {
+            best = (*deg, sc);
+        }
+    }
+    if best.1 >= 4.0 && best.1 > s0 * 2.0 {
+        let out = match best.0 {
+            90 => img.rotate90(),
+            180 => img.rotate180(),
+            _ => img.rotate270(),
+        };
+        return (out, best.0);
+    }
+    (img, 0)
 }

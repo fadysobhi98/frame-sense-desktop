@@ -111,7 +111,7 @@ function App() {
   const [bw, setBw] = useState(true);
   const [toneSuggestion, setToneSuggestion] = useState<{ tone: string; reason: string; probed: number } | null>(null);
   const [toneSuggestBusy, setToneSuggestBusy] = useState(false);
-  const [retouch, setRetouch] = useState(false);
+  const [retouch, setRetouch] = useState(true);
   const [previewBusy, setPreviewBusy] = useState(false);
   const [preview, setPreview] = useState<{ before: string; after: string; name: string; path: string } | null>(null);
   const [acProgress, setAcProgress] = useState<AutoCorrectProgress | null>(null);
@@ -663,7 +663,7 @@ const toggleFullscreen = async () => {
           <footer className="content-footer">
             <span><ShieldCheck size={14}/> Local-first by design</span>
             <span><CircleHelp size={14}/> Everything runs on this PC - originals are never changed</span>
-            <span><Command size={14}/> v0.6.3</span>
+            <span><Command size={14}/> v0.6.4</span>
           </footer>
         </div>
       </main>
