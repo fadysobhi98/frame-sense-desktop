@@ -98,6 +98,7 @@ function App() {
   const [folderSource, setFolderSource] = useState("");
   const [outputDir, setOutputDir] = useState("");
   const [quality, setQuality] = useState(90);
+  const [look, setLook] = useState("warm");
   const [acProgress, setAcProgress] = useState<AutoCorrectProgress | null>(null);
   const [acReport, setAcReport] = useState<AutoCorrectReport | null>(null);
   const [acBusy, setAcBusy] = useState(false);
@@ -177,7 +178,7 @@ const toggleFullscreen = async () => {
     channel.onmessage = (p) => setAcProgress(p);
     try {
       const report = await invoke<AutoCorrectReport>("auto_correct_folder", {
-        folderPath: folderSource, outputDir: outputDir.trim() || null, quality, onProgress: channel
+        folderPath: folderSource, outputDir: outputDir.trim() || null, quality, look, onProgress: channel
       });
       finishAutoCorrect(report);
     } catch (e) {
@@ -196,7 +197,7 @@ const toggleFullscreen = async () => {
     channel.onmessage = (p) => setAcProgress(p);
     try {
       const report = await invoke<AutoCorrectReport>("auto_correct_camera", {
-        projectPath, cameraId, outputDir: outputDir.trim() || null, quality, onProgress: channel
+        projectPath, cameraId, outputDir: outputDir.trim() || null, quality, look, onProgress: channel
       });
       finishAutoCorrect(report);
     } catch (e) {
@@ -443,6 +444,11 @@ const toggleFullscreen = async () => {
                     </button>
                   )}
                 </div>
+                <label>Look: <select value={look} onChange={(e) => setLook(e.target.value)}>
+                  <option value="natural">Natural</option>
+                  <option value="warm">Warm (default)</option>
+                  <option value="golden">Golden</option>
+                </select></label>
                 <label>JPEG quality: {quality}<input type="range" min={50} max={100} value={quality} onChange={(e) => setQuality(Number(e.target.value))}/></label>
                 <button className="primary-button full" disabled={acBusy || !folderSource.trim() || engineStatus?.available === false} onClick={startFolderCorrect}>
                   {acBusy ? <RefreshCw className="spin" size={16}/> : <WandSparkles size={16}/>} Correct this folder
@@ -535,7 +541,7 @@ const toggleFullscreen = async () => {
           <footer className="content-footer">
             <span><ShieldCheck size={14}/> Local-first by design</span>
             <span><CircleHelp size={14}/> Starter scaffold · not a finished product</span>
-            <span><Command size={14}/> v0.4.0</span>
+            <span><Command size={14}/> v0.4.1</span>
           </footer>
         </div>
       </main>

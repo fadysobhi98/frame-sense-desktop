@@ -48,19 +48,16 @@ fn apply_orientation(image: DynamicImage, orientation: u16) -> DynamicImage {
     }
 }
 
-/// EXIF orientation tag for non-RAW files (JPEG etc.); 1 when absent.
-fn exif_orientation(path: &Path) -> u16 {
-    let Ok(file) = std::fs::File::open(path) else {
-        return 1;
-    };
+/// EXIF orientation tag read straight from the file's metadata. Works for
+/// JPEG and for TIFF-based RAW (NEF, CR2, DNG, ARW ...); None when the tag
+/// or the EXIF block is missing or unreadable (e.g. CR3's BMFF container).
+fn exif_orientation(path: &Path) -> Option<u16> {
+    let file = std::fs::File::open(path).ok()?;
     let mut reader = std::io::BufReader::new(file);
-    let Ok(exif) = exif::Reader::new().read_from_container(&mut reader) else {
-        return 1;
-    };
+    let exif = exif::Reader::new().read_from_container(&mut reader).ok()?;
     exif.get_field(exif::Tag::Orientation, exif::In::PRIMARY)
         .and_then(|f| f.value.get_uint(0))
         .map(|v| v as u16)
-        .unwrap_or(1)
 }
 
 pub fn decode_to_dynamic(path: &Path) -> Result<DynamicImage, String> {
@@ -73,7 +70,12 @@ pub fn decode_to_dynamic(path: &Path) -> Result<DynamicImage, String> {
     if is_raw_extension(&ext) {
         let raw = rawler::decode_file(path)
             .map_err(|e| format!("RAW decode failed: {e}"))?;
-        let orientation = orientation_to_exif(raw.orientation);
+        // rawler reports Normal for several cameras (verified: Nikon NEF
+        // ignores the tag) and develop_intermediate does not rotate, so the
+        // file's own EXIF orientation tag is the source of truth; rawler is
+        // the fallback for containers this parser cannot read (e.g. CR3).
+        let orientation =
+            exif_orientation(path).unwrap_or_else(|| orientation_to_exif(raw.orientation));
         let develop = RawDevelop::default();
         let intermediate = develop
             .develop_intermediate(&raw)
@@ -83,7 +85,7 @@ pub fn decode_to_dynamic(path: &Path) -> Result<DynamicImage, String> {
             .ok_or_else(|| "RAW developed to an unsupported pixel layout".to_string())?;
         Ok(apply_orientation(image, orientation))
     } else {
-        let orientation = exif_orientation(path);
+        let orientation = exif_orientation(path).unwrap_or(1);
         let image = image::open(path).map_err(|e| format!("image open failed: {e}"))?;
         Ok(apply_orientation(image, orientation))
     }
@@ -108,8 +110,18 @@ fn orientation_to_exif(o: rawler::Orientation) -> u16 {
 /// Decode one photo, auto-correct it, and write an 8-bit JPEG at `dst`
 /// (parent folder must exist). Returns the JPEG dimensions on success.
 pub fn auto_correct_file(src: &Path, dst: &Path, quality: u8) -> Result<(u32, u32), String> {
+    auto_correct_file_with_look(src, dst, quality, pipeline::Look::Warm)
+}
+
+/// Same as auto_correct_file, with an explicit session look.
+pub fn auto_correct_file_with_look(
+    src: &Path,
+    dst: &Path,
+    quality: u8,
+    look: pipeline::Look,
+) -> Result<(u32, u32), String> {
     let decoded = decode_to_dynamic(src)?;
-    let corrected = pipeline::auto_correct(&decoded);
+    let corrected = pipeline::auto_correct(&decoded, look);
     let straightened = straighten::auto_straighten(&corrected.to_rgb32f());
     let corrected = DynamicImage::ImageRgb32F(straightened);
     let (w, h) = corrected.dimensions();
@@ -180,6 +192,40 @@ pub extern "C" fn fs_raw_auto_correct_file(
             return Err(format!("source file not found: {}", src.display()));
         }
         match auto_correct_file(&src, &dst, quality) {
+            Ok(_) => Ok(()),
+            Err(e) if e.contains("cannot create output") || e.contains("cannot finalize") => {
+                set_last_error(e);
+                return Err("io".to_string());
+            }
+            Err(e) => Err(e),
+        }
+    };
+    match run() {
+        Ok(()) => 0,
+        Err(e) if e == "io" => 2,
+        Err(e) => {
+            set_last_error(e);
+            1
+        }
+    }
+}
+
+/// Process one photo with an explicit session look (0 natural, 1 warm,
+/// 2 golden). Same return codes as fs_raw_auto_correct_file.
+#[no_mangle]
+pub extern "C" fn fs_raw_auto_correct_file_look(
+    src: *const c_char,
+    dst: *const c_char,
+    quality: u8,
+    look: u8,
+) -> i32 {
+    let run = || -> Result<(), String> {
+        let src = read_c_path(src, "source")?;
+        let dst = read_c_path(dst, "destination")?;
+        if !src.is_file() {
+            return Err(format!("source file not found: {}", src.display()));
+        }
+        match auto_correct_file_with_look(&src, &dst, quality, pipeline::Look::from_u8(look)) {
             Ok(_) => Ok(()),
             Err(e) if e.contains("cannot create output") || e.contains("cannot finalize") => {
                 set_last_error(e);

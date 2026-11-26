@@ -492,6 +492,11 @@ pub const DEFAULT_JPEG_QUALITY: u8 = 90;
 // exports done before sorting existed so they land in the new structure.
 pub const SMART_BASIC_PARAMS_VERSION: &str = "smart-basic-v2";
 
+/// Marker file written into a folder-mode output folder recording the job
+/// settings (quality + look) that produced it. Re-running with different
+/// settings re-processes the photos instead of skipping them.
+pub const JOB_MARKER_FILE: &str = ".framesense-job";
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ControlAction {
     Continue,
@@ -582,6 +587,7 @@ pub fn run_auto_correct(
     progress: &dyn Fn(AutoCorrectProgress),
     control: &dyn Fn() -> ControlAction,
     classify: &dyn Fn(&Path) -> SortClass,
+    job_tag: &str,
 ) -> Result<AutoCorrectReport, String> {
     if camera_id != "Camera 1" && camera_id != "Camera 2" {
         return Err("Camera must be Camera 1 or Camera 2.".into());
@@ -601,7 +607,7 @@ pub fn run_auto_correct(
     }
     let output_camera_dir = output_root.join(camera_id);
 
-    let params_key = format!("{SMART_BASIC_PARAMS_VERSION}:q{quality}");
+    let params_key = format!("{SMART_BASIC_PARAMS_VERSION}:q{quality}:{job_tag}");
 
     let mut stmt = conn
         .prepare(
@@ -804,6 +810,7 @@ pub fn run_auto_correct_folder(
     progress: &dyn Fn(AutoCorrectProgress),
     control: &dyn Fn() -> ControlAction,
     classify: &dyn Fn(&Path) -> SortClass,
+    job_tag: &str,
 ) -> Result<AutoCorrectReport, String> {
     let quality = quality.clamp(50, 100);
     let folder_root = canonical_for_compare(&PathBuf::from(folder_path.trim()));
@@ -842,6 +849,15 @@ pub fn run_auto_correct_folder(
         fs::create_dir_all(&output_root)
             .map_err(|e| format!("Could not create the output folder: {e}"))?;
     }
+    // If this output folder was produced with different settings (quality
+    // or look), reprocess everything instead of skipping; a folder with no
+    // marker (older app versions) keeps the old skip behaviour.
+    let marker = output_root.join(JOB_MARKER_FILE);
+    let reprocess = match fs::read_to_string(&marker) {
+        Ok(tag) => tag.trim() != job_tag,
+        Err(_) => false,
+    };
+
     let mut processed = 0usize;
     let mut already_done = 0usize;
     let mut failed: Vec<AutoCorrectFailure> = Vec::new();
@@ -881,9 +897,12 @@ pub fn run_auto_correct_folder(
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("image");
-        if sorted_output_exists(&output_root, stem) {
+        if !reprocess && sorted_output_exists(&output_root, stem) {
             already_done += 1;
             continue;
+        }
+        if reprocess {
+            remove_sorted_outputs(&output_root, stem);
         }
         let output_file = unique_destination(&output_root, &format!("{stem}.jpg"));
         match correct(&source_file, &output_file, quality) {
@@ -908,6 +927,10 @@ pub fn run_auto_correct_folder(
         failed: failed.len(),
     });
 
+    if !stopped && processed > 0 {
+        let _ = fs::write(&marker, job_tag);
+    }
+
     Ok(AutoCorrectReport {
         total,
         processed,
@@ -917,6 +940,21 @@ pub fn run_auto_correct_folder(
         stopped,
         counts,
     })
+}
+
+/// Remove any corrected copies of this stem (flat or in sorting
+/// subfolders) so a settings change re-processes cleanly.
+fn remove_sorted_outputs(output_root: &Path, stem: &str) {
+    let name = format!("{stem}.jpg");
+    let _ = fs::remove_file(output_root.join(&name));
+    for c in [
+        SortClass::Regular,
+        SortClass::Couple,
+        SortClass::Group,
+        SortClass::Rejected,
+    ] {
+        let _ = fs::remove_file(output_root.join(c.subfolder()).join(&name));
+    }
 }
 
 #[cfg(test)]
@@ -1222,6 +1260,7 @@ mod tests {
             &|_| {},
             &|| ControlAction::Continue,
             &|_| SortClass::Regular,
+            "test",
         )
         .unwrap();
 
@@ -1239,8 +1278,8 @@ mod tests {
     #[test]
     fn auto_correct_rerun_skips_done() {
         let (_base, _card, project) = project_with_photos();
-        let first = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular).unwrap();
-        let second = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular).unwrap();
+        let first = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular, "test").unwrap();
+        let second = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular, "test").unwrap();
         assert_eq!(first.processed, 2);
         assert_eq!(second.processed, 0);
         assert_eq!(second.already_done, 2);
@@ -1250,8 +1289,8 @@ mod tests {
     #[test]
     fn auto_correct_new_quality_reprocesses() {
         let (_base, _card, project) = project_with_photos();
-        run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular).unwrap();
-        let rerun = run_auto_correct(&project.project_path, "Camera 1", None, 80, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular).unwrap();
+        run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular, "test").unwrap();
+        let rerun = run_auto_correct(&project.project_path, "Camera 1", None, 80, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular, "test").unwrap();
         assert_eq!(rerun.processed, 2);
         // Old outputs were not overwritten; new ones got unique names.
         let dir = PathBuf::from(&project.project_path).join("Export/Camera 1/Regular");
@@ -1263,7 +1302,7 @@ mod tests {
     #[test]
     fn auto_correct_collects_failures() {
         let (_base, _card, project) = project_with_photos();
-        let report = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_fail, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular).unwrap();
+        let report = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_fail, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular, "test").unwrap();
         assert_eq!(report.processed, 0);
         assert_eq!(report.failed.len(), 2);
         assert!(report.failed[0].error.contains("engine exploded"));
@@ -1271,7 +1310,7 @@ mod tests {
         let leftover: Vec<_> = fs::read_dir(dir).unwrap().filter_map(|e| e.ok()).collect();
         assert!(leftover.is_empty());
         // Failure is not recorded as done: a retry with a working engine processes it.
-        let retry = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular).unwrap();
+        let retry = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular, "test").unwrap();
         assert_eq!(retry.processed, 2);
     }
 
@@ -1289,6 +1328,7 @@ mod tests {
             &|_| {},
             &|| ControlAction::Continue,
             &|_| SortClass::Regular,
+            "test",
         )
         .unwrap();
         let picked_clean = canonical_for_compare(picked.path());
@@ -1307,6 +1347,7 @@ mod tests {
             &|_| {},
             &|| ControlAction::Continue,
             &|_| SortClass::Regular,
+            "test",
         );
         assert!(bad.is_err());
     }
@@ -1335,7 +1376,7 @@ mod tests {
         assert!(fs::read_dir(PathBuf::from(&project.project_path).join("Originals/Camera 1"))
             .unwrap().next().is_none());
         // Auto-correct resolves the moved file through the recorded absolute path.
-        let report = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular).unwrap();
+        let report = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular, "test").unwrap();
         assert_eq!(report.processed, 1);
     }
 
@@ -1359,6 +1400,7 @@ mod tests {
             &|_| {},
             &|| ControlAction::Continue,
             &|_| SortClass::Regular,
+            "test",
         )
         .unwrap();
 
@@ -1386,6 +1428,7 @@ mod tests {
             &|_| {},
             &|| ControlAction::Continue,
             &|_| SortClass::Regular,
+            "test",
         )
         .unwrap();
         assert_eq!(report.total, 0);
@@ -1402,6 +1445,7 @@ mod tests {
             &|_| {},
             &|| ControlAction::Continue,
             &|_| SortClass::Regular,
+            "test",
         )
         .unwrap();
         assert_eq!(report.total, 0);
@@ -1414,14 +1458,19 @@ mod tests {
         let photos = TestDir::new("fold-rerun");
         write_file(photos.path(), "a.cr2", &[8u8; 128]);
 
-        let first = run_auto_correct_folder(photos.path().to_str().unwrap(), None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular).unwrap();
+        let first = run_auto_correct_folder(photos.path().to_str().unwrap(), None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular, "test").unwrap();
         assert_eq!(first.processed, 1);
-        let second = run_auto_correct_folder(photos.path().to_str().unwrap(), None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular).unwrap();
+        let second = run_auto_correct_folder(photos.path().to_str().unwrap(), None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular, "test").unwrap();
         assert_eq!(second.total, 1, "output JPEGs must not be re-scanned as input");
         assert_eq!(second.processed, 0);
         assert_eq!(second.already_done, 1);
         let out = PathBuf::from(&first.output_dir);
-        assert_eq!(fs::read_dir(&out).unwrap().count(), 1, "no duplicate outputs");
+        let entries = fs::read_dir(&out)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name() != JOB_MARKER_FILE)
+            .count();
+        assert_eq!(entries, 1, "no duplicate outputs");
     }
 
     /// Folder mode rejects output folders that would swallow the source.
@@ -1438,6 +1487,7 @@ mod tests {
             &|_| {},
             &|| ControlAction::Continue,
             &|_| SortClass::Regular,
+            "test",
         );
         assert!(same.is_err());
 
@@ -1453,6 +1503,7 @@ mod tests {
             &|_| {},
             &|| ControlAction::Continue,
             &|_| SortClass::Regular,
+            "test",
         );
         assert!(swallowing.is_err());
     }
@@ -1470,6 +1521,7 @@ mod tests {
             &|_| {},
             &|| ControlAction::Continue,
             &|_| SortClass::Regular,
+            "test",
         )
         .unwrap();
         assert_eq!(report.processed, 0);
@@ -1485,7 +1537,7 @@ mod tests {
         // Remove the pre-created Export folder tree so we can prove no recreation.
         let export = PathBuf::from(&project.project_path).join("Export");
         fs::remove_dir_all(&export).unwrap();
-        let report = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular).unwrap();
+        let report = run_auto_correct(&project.project_path, "Camera 1", None, 90, &fake_correct_ok, &|_| {}, &|| ControlAction::Continue, &|_| SortClass::Regular, "test").unwrap();
         assert_eq!(report.total, 0);
         assert!(!export.exists());
     }
@@ -1515,6 +1567,7 @@ mod tests {
             &|_| {},
             &control,
             &|_| SortClass::Regular,
+            "test",
         )
         .unwrap();
         assert!(report.stopped);
@@ -1528,6 +1581,7 @@ mod tests {
             &|_| {},
             &|| ControlAction::Continue,
             &|_| SortClass::Regular,
+            "test",
         )
         .unwrap();
         assert_eq!(resume.processed, 3);
@@ -1586,6 +1640,7 @@ mod tests {
             &|_| {},
             &|| ControlAction::Continue,
             &classify,
+            "test",
         )
         .unwrap();
         let out = photos.path().join("Frame Sense Corrected");
@@ -1609,9 +1664,34 @@ mod tests {
             &|_| {},
             &|| ControlAction::Continue,
             &classify,
+            "test",
         )
         .unwrap();
         assert_eq!(second.processed, 0);
         assert_eq!(second.already_done, 4);
+    }
+
+    /// Changing the job settings (quality/look) re-processes instead of
+    /// skipping, without leaving duplicate files behind.
+    #[test]
+    fn folder_mode_reprocesses_when_settings_change() {
+        let photos = TestDir::new("retag-photos");
+        write_file(photos.path(), "a.cr2", b"x");
+        let first = run_auto_correct_folder(
+            photos.path().to_str().unwrap(), None, 90, &fake_correct_ok, &|_| {},
+            &|| ControlAction::Continue, &|_| SortClass::Regular, "q90:look1",
+        )
+        .unwrap();
+        assert_eq!(first.processed, 1);
+        let second = run_auto_correct_folder(
+            photos.path().to_str().unwrap(), None, 90, &fake_correct_ok, &|_| {},
+            &|| ControlAction::Continue, &|_| SortClass::Regular, "q90:look2",
+        )
+        .unwrap();
+        assert_eq!(second.processed, 1);
+        assert_eq!(second.already_done, 0);
+        let out = photos.path().join("Frame Sense Corrected/Regular");
+        let jpgs: Vec<_> = fs::read_dir(out).unwrap().filter_map(|e| e.ok()).collect();
+        assert_eq!(jpgs.len(), 1, "no duplicates after re-processing");
     }
 }

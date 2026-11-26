@@ -17,18 +17,22 @@ fn create_project(
 }
 
 #[command]
-fn import_camera_files(
+async fn import_camera_files(
     project_path: String,
     source_path: String,
     camera_id: String,
     destination_dir: Option<String>,
 ) -> Result<core::ImportResult, String> {
-    core::import_camera_files(
-        &project_path,
-        &source_path,
-        &camera_id,
-        destination_dir.as_deref(),
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        core::import_camera_files(
+            &project_path,
+            &source_path,
+            &camera_id,
+            destination_dir.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| format!("import failed to run: {e}"))?
 }
 
 // ---------------------------------------------------------------------------
@@ -37,6 +41,8 @@ fn import_camera_files(
 // ---------------------------------------------------------------------------
 
 type FnAutoCorrect = unsafe extern "C" fn(*const std::ffi::c_char, *const std::ffi::c_char, u8) -> i32;
+type FnAutoCorrectLook =
+    unsafe extern "C" fn(*const std::ffi::c_char, *const std::ffi::c_char, u8, u8) -> i32;
 type FnLastError = unsafe extern "C" fn() -> *mut std::ffi::c_char;
 type FnFreeString = unsafe extern "C" fn(*mut std::ffi::c_char);
 type FnVersion = unsafe extern "C" fn() -> *mut std::ffi::c_char;
@@ -44,6 +50,7 @@ type FnVersion = unsafe extern "C" fn() -> *mut std::ffi::c_char;
 struct RawEngine {
     _lib: libloading::Library,
     auto_correct: FnAutoCorrect,
+    auto_correct_look: Option<FnAutoCorrectLook>,
     last_error: FnLastError,
     free_string: FnFreeString,
     version: FnVersion,
@@ -99,9 +106,15 @@ fn load_engine() -> Result<RawEngine, String> {
         let version = *lib
             .get::<FnVersion>(b"fs_raw_engine_version\0")
             .map_err(|e| format!("RAW engine is incomplete: {e}"))?;
+        // Optional: session-look-aware entry point (engine >= 0.4.1).
+        let auto_correct_look = lib
+            .get::<FnAutoCorrectLook>(b"fs_raw_auto_correct_file_look\0")
+            .ok()
+            .map(|s| *s);
         Ok(RawEngine {
             _lib: lib,
             auto_correct,
+            auto_correct_look,
             last_error,
             free_string,
             version,
@@ -130,12 +143,21 @@ fn engine_string(engine: &RawEngine, ptr: *mut std::ffi::c_char) -> String {
 }
 
 fn engine_correct(src: &Path, dst: &Path, quality: u8) -> Result<(), String> {
+    engine_correct_look(src, dst, quality, 1)
+}
+
+fn engine_correct_look(src: &Path, dst: &Path, quality: u8, look: u8) -> Result<(), String> {
     let engine = engine()?;
     let src_c = CString::new(src.to_string_lossy().as_bytes())
         .map_err(|_| "source path is not representable".to_string())?;
     let dst_c = CString::new(dst.to_string_lossy().as_bytes())
         .map_err(|_| "destination path is not representable".to_string())?;
-    let code = unsafe { (engine.auto_correct)(src_c.as_ptr(), dst_c.as_ptr(), quality) };
+    let code = unsafe {
+        match engine.auto_correct_look {
+            Some(f) => f(src_c.as_ptr(), dst_c.as_ptr(), quality, look),
+            None => (engine.auto_correct)(src_c.as_ptr(), dst_c.as_ptr(), quality),
+        }
+    };
     if code == 0 {
         Ok(())
     } else {
@@ -208,53 +230,84 @@ fn set_processing_control(command: String) -> Result<(), String> {
     Ok(())
 }
 
+// Heavy work runs on a blocking thread, never the UI thread: the window
+// stays responsive and Pause/Stop work while hundreds of photos process.
 #[command]
-fn auto_correct_folder(
+async fn auto_correct_folder(
     folder_path: String,
     output_dir: Option<String>,
     quality: Option<u8>,
+    look: Option<String>,
     on_progress: tauri::ipc::Channel<core::AutoCorrectProgress>,
 ) -> Result<core::AutoCorrectReport, String> {
-    engine()?;
-    reset_processing_control();
-    let quality = quality.unwrap_or(core::DEFAULT_JPEG_QUALITY);
-    core::run_auto_correct_folder(
-        &folder_path,
-        output_dir.as_deref(),
-        quality,
-        &engine_correct,
-        &|p| {
-            let _ = on_progress.send(p);
-        },
-        &processing_control,
-        &classify::classify_output,
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        engine()?;
+        reset_processing_control();
+        let quality = quality.unwrap_or(core::DEFAULT_JPEG_QUALITY);
+        let look_num = look_code(look.as_deref());
+        let correct = move |src: &Path, dst: &Path, q: u8| {
+            engine_correct_look(src, dst, q, look_num)
+        };
+        core::run_auto_correct_folder(
+            &folder_path,
+            output_dir.as_deref(),
+            quality,
+            &correct,
+            &|p| {
+                let _ = on_progress.send(p);
+            },
+            &processing_control,
+            &classify::classify_output,
+            &format!("q{quality}:look{look_num}"),
+        )
+    })
+    .await
+    .map_err(|e| format!("processing failed to run: {e}"))?
+}
+
+/// Session look name to the engine's look code.
+fn look_code(look: Option<&str>) -> u8 {
+    match look {
+        Some("natural") => 0,
+        Some("golden") => 2,
+        _ => 1, // warm is the default
+    }
 }
 
 #[command]
-fn auto_correct_camera(
+async fn auto_correct_camera(
     project_path: String,
     camera_id: String,
     output_dir: Option<String>,
     quality: Option<u8>,
+    look: Option<String>,
     on_progress: tauri::ipc::Channel<core::AutoCorrectProgress>,
 ) -> Result<core::AutoCorrectReport, String> {
-    // Surface a missing engine before touching the project.
-    engine()?;
-    reset_processing_control();
-    let quality = quality.unwrap_or(core::DEFAULT_JPEG_QUALITY);
-    core::run_auto_correct(
-        &project_path,
-        &camera_id,
-        output_dir.as_deref(),
-        quality,
-        &engine_correct,
-        &|p| {
-            let _ = on_progress.send(p);
-        },
-        &processing_control,
-        &classify::classify_output,
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        // Surface a missing engine before touching the project.
+        engine()?;
+        reset_processing_control();
+        let quality = quality.unwrap_or(core::DEFAULT_JPEG_QUALITY);
+        let look_num = look_code(look.as_deref());
+        let correct = move |src: &Path, dst: &Path, q: u8| {
+            engine_correct_look(src, dst, q, look_num)
+        };
+        core::run_auto_correct(
+            &project_path,
+            &camera_id,
+            output_dir.as_deref(),
+            quality,
+            &correct,
+            &|p| {
+                let _ = on_progress.send(p);
+            },
+            &processing_control,
+            &classify::classify_output,
+            &format!("q{quality}:look{look_num}"),
+        )
+    })
+    .await
+    .map_err(|e| format!("processing failed to run: {e}"))?
 }
 
 pub fn run() {

@@ -5,6 +5,41 @@
 
 use image::{DynamicImage, Rgb32FImage};
 
+/// Session look presets. Honest scope: still deterministic heuristics,
+/// stronger at higher levels, never a creative restyle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Look {
+    Natural,
+    Warm,
+    Golden,
+}
+
+impl Look {
+    pub fn from_u8(v: u8) -> Look {
+        match v {
+            0 => Look::Natural,
+            2 => Look::Golden,
+            _ => Look::Warm,
+        }
+    }
+    /// Warm grade strength: 0 = none, 1 = strongest.
+    fn warmth(self) -> f32 {
+        match self {
+            Look::Natural => 0.15,
+            Look::Warm => 0.55,
+            Look::Golden => 1.0,
+        }
+    }
+    /// Extra saturation on top of the adaptive amount.
+    fn saturation_boost(self) -> f32 {
+        match self {
+            Look::Natural => 0.0,
+            Look::Warm => 0.03,
+            Look::Golden => 0.06,
+        }
+    }
+}
+
 const MEDIAN_TARGET: f32 = 0.45;
 const GAIN_MIN: f32 = 0.5;
 const GAIN_MAX: f32 = 2.0;
@@ -31,6 +66,12 @@ pub struct CorrectionPlan {
     pub skin_warmth: f32,
     /// Mild saturation multiplier for dull photos (1.0 = unchanged).
     pub saturation: f32,
+    /// Warm grade strength from the session look (0..1).
+    pub warmth: f32,
+    /// Additive lift for dark tones (backlit subjects), 0 = none.
+    pub shadow_lift: f32,
+    /// Highlight pull-down strength (bright sky / clothes), 0 = none.
+    pub highlight_compress: f32,
 }
 
 /// Hue (degrees) of an RGB pixel in 0..1 floats; None for near-gray.
@@ -148,6 +189,17 @@ pub fn plan_from_lumas(sorted_lumas: &[f32]) -> CorrectionPlan {
     // otherwise leave tone mapping to gain + highlight shoulder.
     let gamma = if p99 * gain < 0.85 { 0.85 } else { 1.0 };
 
+    let p10 = percentile(sorted_lumas, 0.10);
+
+    // Backlit / deep-shadow photos: after exposure the dark tones still sit
+    // near black, so lift them. Scaled by how far below 0.16 they land.
+    let shadow_lift = ((0.16 - p10 * gain).max(0.0) * 0.9).min(0.14);
+
+    // Bright scenes that still clip after exposure: pull the highlights
+    // down so sky and white clothes keep texture instead of flat white.
+    let clipped = (p99 * gain - 0.98).max(0.0);
+    let highlight_compress = (clipped * 1.5).clamp(0.0, 0.35);
+
     // Narrow histogram -> add some contrast; already wide -> almost none.
     let spread = (p99 - p01).clamp(0.0, 1.0);
     let contrast_mix = (0.30 - spread).clamp(0.02, 0.16);
@@ -160,22 +212,29 @@ pub fn plan_from_lumas(sorted_lumas: &[f32]) -> CorrectionPlan {
         wb: (1.0, 1.0, 1.0),
         skin_warmth: 0.0,
         saturation: 1.0,
+        warmth: 0.0,
+        shadow_lift,
+        highlight_compress,
     }
 }
 
 /// Full per-photo plan: exposure from the luma histogram, white balance and
-/// warmth/skin nudges from channel statistics.
-pub fn plan_for_image(rgb: &Rgb32FImage) -> CorrectionPlan {
+/// warmth/skin nudges from channel statistics, graded by the session look.
+pub fn plan_for_image(rgb: &Rgb32FImage, look: Look) -> CorrectionPlan {
     let lumas = sample_lumas(rgb);
     let mut plan = plan_from_lumas(&lumas);
     let stats = channel_stats(rgb);
     plan.wb = white_balance_gains(&stats);
+    plan.warmth = look.warmth();
     // Skin: nudge median skin hue toward a warm natural ~38 deg, max +-4 deg.
     if let Some(h) = stats.skin_hue_median {
         plan.skin_warmth = ((38.0 - h) / 38.0 * 0.10).clamp(-0.04, 0.04);
     }
-    // Dull photos get a touch of saturation, lively ones stay put.
-    plan.saturation = (1.0 + (0.10 - stats.mean_chroma) * 0.6).clamp(1.0, 1.07);
+    // Dull photos get a touch of saturation, lively ones stay put; the
+    // chosen look adds a little more.
+    plan.saturation = ((1.0 + (0.10 - stats.mean_chroma) * 0.6).clamp(1.0, 1.07)
+        + look.saturation_boost())
+    .clamp(1.0, 1.13);
     plan
 }
 
@@ -195,6 +254,18 @@ pub fn apply_plan(rgb: &mut Rgb32FImage, plan: &CorrectionPlan) {
             r *= 1.0 + plan.skin_warmth;
             b *= 1.0 - plan.skin_warmth;
         }
+        // Warm grade: push toward golden sun. Skin tones are protected so
+        // faces stay natural instead of going neon orange.
+        if plan.warmth > 0.0 {
+            let w = if is_skinish(r, g, b) {
+                plan.warmth * 0.45
+            } else {
+                plan.warmth
+            };
+            r *= 1.0 + 0.10 * w;
+            g *= 1.0 - 0.02 * w;
+            b *= 1.0 - 0.12 * w;
+        }
         // Gentle saturation around the pixel's own gray point.
         if plan.saturation > 1.0 {
             let gray = 0.2126 * r + 0.7152 * g + 0.0722 * b;
@@ -207,12 +278,113 @@ pub fn apply_plan(rgb: &mut Rgb32FImage, plan: &CorrectionPlan) {
             // Exposure gain, small black-point floor, optional dull-image lift.
             let mut x = (channels[i] * plan.gain - plan.black_point).max(0.0);
             x = x.powf(plan.gamma);
+            // Open up shadows (backlit subjects): lifts dark tones most,
+            // fades out by mid-gray.
+            if plan.shadow_lift > 0.0 && x < 0.35 {
+                let mask = 1.0 - (x / 0.35);
+                x += plan.shadow_lift * mask * mask;
+            }
+            // Pull down highlights so bright sky/clothes keep texture.
+            if plan.highlight_compress > 0.0 && x > 0.80 {
+                let t = x - 0.80;
+                x = 0.80 + t / (1.0 + plan.highlight_compress * 8.0 * t);
+            }
             // Soft highlight shoulder: eases into 1.0 instead of clipping.
             if x > 0.95 {
                 x = 0.95 + 0.05 * (1.0 - (-(x - 0.95) / 0.05).exp());
             }
             let curved = x + plan.contrast_mix * (smoothstep(x) - x);
             *channel = curved.clamp(0.0, 1.0);
+        }
+    }
+}
+
+/// Local tone mapping on a coarse luma grid: lifts locally dark regions
+/// (faces against a bright sky) and settles locally bright ones, while
+/// keeping the photo's own contrast. A basic-edit dodge and burn, still a
+/// deterministic heuristic.
+pub fn local_tone_map(rgb: &mut Rgb32FImage, strength: f32) {
+    let (w, h) = rgb.dimensions();
+    if w < 16 || h < 16 || strength <= 0.0 {
+        return;
+    }
+    // Coarse grid of local mean luma (~48 cells on the long side).
+    let gw = 48usize.min(w as usize);
+    let gh = ((h as usize) * gw / (w as usize)).max(1);
+    let mut grid = vec![0.0f64; gw * gh];
+    let mut count = vec![0u32; gw * gh];
+    let (wf, hf) = (w as f32, h as f32);
+    // Stride only for building the local-mean grid (sampling is fine there);
+    // the apply pass below must touch every pixel.
+    let step = (((w as usize * h as usize) / 400_000).max(1)) as u32;
+    for y in (0..h).step_by(step as usize) {
+        for x in (0..w).step_by(step as usize) {
+            let [r, g, b] = rgb.get_pixel(x, y).0;
+            let l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            let gx = ((x as f32 / wf) * gw as f32).min(gw as f32 - 1.0) as usize;
+            let gy = ((y as f32 / hf) * gh as f32).min(gh as f32 - 1.0) as usize;
+            grid[gy * gw + gx] += l as f64;
+            count[gy * gw + gx] += 1;
+        }
+    }
+    let mut local: Vec<f32> = grid
+        .iter()
+        .zip(count.iter())
+        .map(|(s, c)| if *c > 0 { (*s / *c as f64) as f32 } else { 0.0 })
+        .collect();
+    // Two box-blur passes so the map is smooth (no halos).
+    for _ in 0..2 {
+        let prev = local.clone();
+        for gy in 0..gh {
+            for gx in 0..gw {
+                let mut sum = 0.0;
+                let mut n = 0.0;
+                for dy in -1i32..=1 {
+                    for dx in -1i32..=1 {
+                        let xx = gx as i32 + dx;
+                        let yy = gy as i32 + dy;
+                        if xx >= 0 && yy >= 0 && (xx as usize) < gw && (yy as usize) < gh {
+                            sum += prev[yy as usize * gw + xx as usize];
+                            n += 1.0;
+                        }
+                    }
+                }
+                local[gy * gw + gx] = sum / n;
+            }
+        }
+    }
+    let bilinear = |fx: f32, fy: f32| -> f32 {
+        let x0 = (fx.floor() as usize).min(gw - 1);
+        let y0 = (fy.floor() as usize).min(gh - 1);
+        let x1 = (x0 + 1).min(gw - 1);
+        let y1 = (y0 + 1).min(gh - 1);
+        let tx = fx - x0 as f32;
+        let ty = fy - y0 as f32;
+        let a = local[y0 * gw + x0] * (1.0 - tx) + local[y0 * gw + x1] * tx;
+        let b = local[y1 * gw + x0] * (1.0 - tx) + local[y1 * gw + x1] * tx;
+        a * (1.0 - ty) + b * ty
+    };
+    for y in 0..h {
+        for x in 0..w {
+            let p = rgb.get_pixel_mut(x, y);
+            let l = 0.2126 * p.0[0] + 0.7152 * p.0[1] + 0.0722 * p.0[2];
+            if l < 1e-4 {
+                continue;
+            }
+            let loc = bilinear(
+                (x as f32 / wf) * gw as f32 - 0.5,
+                (y as f32 / hf) * gh as f32 - 0.5,
+            );
+            if loc < 1e-4 {
+                continue;
+            }
+            // Filmic-ish target for the local mean: sqrt lifts shadows and
+            // compresses highlights; blended by strength.
+            let target = loc * (1.0 - strength) + strength * (loc.sqrt() * 0.9);
+            let ratio = (target / loc).clamp(0.7, 1.6);
+            for c in p.0.iter_mut() {
+                *c *= ratio;
+            }
         }
     }
 }
@@ -237,12 +409,15 @@ pub fn sample_lumas(rgb: &Rgb32FImage) -> Vec<f32> {
     lumas
 }
 
-pub fn auto_correct(image: &DynamicImage) -> DynamicImage {
+pub fn auto_correct(image: &DynamicImage, look: Look) -> DynamicImage {
     let mut rgb = image.to_rgb32f();
     if rgb.width() == 0 || rgb.height() == 0 {
         return image.clone();
     }
-    let plan = plan_for_image(&rgb);
+    // Local tone first (on the as-shot distribution), then the graded plan
+    // adapts to what remains.
+    local_tone_map(&mut rgb, 0.5);
+    let plan = plan_for_image(&rgb, look);
     apply_plan(&mut rgb, &plan);
     DynamicImage::ImageRgb32F(rgb)
 }
@@ -288,7 +463,7 @@ mod tests {
         for (i, p) in img.pixels_mut().enumerate() {
             *p = image::Rgb([i as f32 / 16.0, 0.5, 1.0 - i as f32 / 16.0]);
         }
-        let plan = CorrectionPlan { gain: 2.0, black_point: 0.05, gamma: 1.0, contrast_mix: 0.2, wb: (1.0, 1.0, 1.0), skin_warmth: 0.0, saturation: 1.0 };
+        let plan = CorrectionPlan { gain: 2.0, black_point: 0.05, gamma: 1.0, contrast_mix: 0.2, wb: (1.0, 1.0, 1.0), skin_warmth: 0.0, saturation: 1.0, warmth: 0.0, shadow_lift: 0.0, highlight_compress: 0.0 };
         apply_plan(&mut img, &plan);
         for p in img.pixels() {
             for c in p.0 {
@@ -309,9 +484,68 @@ mod tests {
     }
 
     #[test]
+    fn warm_grade_visibly_warms_neutral_pixel() {
+        for look in [Look::Warm, Look::Golden] {
+            let mut img = Rgb32FImage::new(1, 1);
+            img.put_pixel(0, 0, image::Rgb([0.45, 0.45, 0.45]));
+            let plan = plan_for_image(&img, look);
+            apply_plan(&mut img, &plan);
+            let [r, _g, b] = img.get_pixel(0, 0).0;
+            assert!(r > b + 0.03, "{look:?}: r={r} b={b}");
+        }
+        // Golden warms more than Warm.
+        let mut a = Rgb32FImage::new(1, 1);
+        a.put_pixel(0, 0, image::Rgb([0.45, 0.45, 0.45]));
+        let pa = plan_for_image(&a, Look::Warm);
+        apply_plan(&mut a, &pa);
+        let mut b2 = Rgb32FImage::new(1, 1);
+        b2.put_pixel(0, 0, image::Rgb([0.45, 0.45, 0.45]));
+        let pb = plan_for_image(&b2, Look::Golden);
+        apply_plan(&mut b2, &pb);
+        let wa = a.get_pixel(0, 0).0[0] - a.get_pixel(0, 0).0[2];
+        let wb = b2.get_pixel(0, 0).0[0] - b2.get_pixel(0, 0).0[2];
+        assert!(wb > wa, "golden {wb} should warm more than warm {wa}");
+    }
+
+    #[test]
+    fn backlit_histogram_gets_shadow_lift() {
+        // Mostly dark subject (luma 0.05) with a bright sky strip (0.95).
+        let mut lumas = vec![0.05f32; 700];
+        lumas.extend(vec![0.95f32; 300]);
+        lumas.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+        let plan = plan_from_lumas(&lumas);
+        assert!(plan.shadow_lift > 0.03, "expected shadow lift, got {}", plan.shadow_lift);
+    }
+
+    #[test]
+    fn clipping_histogram_gets_highlight_compress() {
+        // Dark median pushes gain up; the bright tail then genuinely clips.
+        let mut lumas = vec![0.2f32; 700];
+        lumas.extend(vec![0.99f32; 300]);
+        lumas.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+        let plan = plan_from_lumas(&lumas);
+        assert!(plan.highlight_compress > 0.05, "expected highlight compression, got {}", plan.highlight_compress);
+    }
+
+    #[test]
+    fn local_tone_lifts_dark_subject_on_bright_background() {
+        // Left half dark (0.08), right half bright (0.9).
+        let mut img = Rgb32FImage::new(64, 64);
+        for y in 0..64 {
+            for x in 0..64 {
+                let v = if x < 32 { 0.08 } else { 0.9 };
+                img.put_pixel(x, y, image::Rgb([v, v, v]));
+            }
+        }
+        local_tone_map(&mut img, 0.5);
+        let dark_after = img.get_pixel(10, 32).0[0];
+        assert!(dark_after > 0.10, "dark region should be lifted, got {dark_after}");
+    }
+
+    #[test]
     fn empty_image_is_untouched() {
         let img = DynamicImage::ImageRgb8(RgbImage::new(0, 0));
-        let out = auto_correct(&img);
+        let out = auto_correct(&img, Look::Natural);
         assert_eq!(out.dimensions(), (0, 0));
     }
 }
