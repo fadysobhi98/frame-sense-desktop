@@ -931,7 +931,7 @@ dependencies = [
 
 [[package]]
 name = "framesense_desktop"
-version = "0.4.2"
+version = "0.5.1"
 dependencies = [
  "hex",
  "image",

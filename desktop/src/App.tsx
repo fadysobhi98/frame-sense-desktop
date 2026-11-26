@@ -99,10 +99,19 @@ function App() {
   const [outputDir, setOutputDir] = useState("");
   const [quality, setQuality] = useState(90);
   const [look, setLook] = useState("warm");
+  const TONES: { id: string; label: string; hint: string }[] = [
+    { id: "natural", label: "Natural", hint: "True-to-life, gentle correction only" },
+    { id: "warm", label: "Warm Golden", hint: "Golden-hour warmth, the default" },
+    { id: "golden", label: "Golden+", hint: "Strongest warm orange grade" },
+    { id: "peach", label: "Peach-Gold", hint: "Soft peach glow, creamy highlights" },
+    { id: "amber", label: "Amber Indoor", hint: "Deep warm for tungsten/dark venues" },
+    { id: "airy", label: "Bright Airy", hint: "Light, lifted, soft wedding look" },
+    { id: "cinematic", label: "Cinematic", hint: "Film look: faded blacks, creamy highlights" },
+  ];
   const [bw, setBw] = useState(true);
   const [retouch, setRetouch] = useState(false);
   const [previewBusy, setPreviewBusy] = useState(false);
-  const [preview, setPreview] = useState<{ before: string; after: string; name: string } | null>(null);
+  const [preview, setPreview] = useState<{ before: string; after: string; name: string; path: string } | null>(null);
   const [acProgress, setAcProgress] = useState<AutoCorrectProgress | null>(null);
   const [acReport, setAcReport] = useState<AutoCorrectReport | null>(null);
   const [acBusy, setAcBusy] = useState(false);
@@ -202,8 +211,22 @@ const toggleFullscreen = async () => {
       if (!picked || typeof picked !== "string") return;
       setPreviewBusy(true);
       setPreview(null);
-      const [before, after] = await invoke<[string, string]>("retouch_preview", { photoPath: picked, look });
-      setPreview({ before, after, name: picked.split(/[\\/]/).pop() || picked });
+      const [before, after] = await invoke<[string, string]>("retouch_preview", { photoPath: picked, look, retouch });
+      setPreview({ before, after, name: picked.split(/[\\/]/).pop() || picked, path: picked });
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setPreviewBusy(false);
+    }
+  }
+
+  async function previewTone(toneId: string) {
+    if (!preview?.path) return;
+    setLook(toneId);
+    setPreviewBusy(true);
+    try {
+      const [before, after] = await invoke<[string, string]>("retouch_preview", { photoPath: preview.path, look: toneId, retouch });
+      setPreview({ ...preview, before, after });
     } catch (e) {
       setError(String(e));
     } finally {
@@ -467,11 +490,15 @@ const toggleFullscreen = async () => {
                     </button>
                   )}
                 </div>
-                <label>Look: <select value={look} onChange={(e) => setLook(e.target.value)}>
-                  <option value="natural">Natural</option>
-                  <option value="warm">Warm (default)</option>
-                  <option value="golden">Golden</option>
+                <label>Session tone: <select value={look} onChange={(e) => setLook(e.target.value)}>
+                  {TONES.map((t) => <option key={t.id} value={t.id}>{t.label}{t.id === "warm" ? " (default)" : ""}</option>)}
                 </select></label>
+                <div className="field-note">
+                  {TONES.find((t) => t.id === look)?.hint}
+                  <button type="button" className="secondary-button" disabled={previewBusy} onClick={previewRetouch} style={{ marginLeft: 8 }}>
+                    {previewBusy ? <RefreshCw className="spin" size={14}/> : null} Preview on a photo
+                  </button>
+                </div>
                 <label>JPEG quality: {quality}<input type="range" min={50} max={100} value={quality} onChange={(e) => setQuality(Number(e.target.value))}/></label>
                 <label><input type="checkbox" checked={bw} onChange={(e) => setBw(e.target.checked)}/> Also export a B&W folder</label>
                 <label title="Finds faces with a local AI model, then whitens teeth and sharpens skin texture. No smoothing, nothing leaves your PC.">
@@ -480,22 +507,35 @@ const toggleFullscreen = async () => {
                 {retouch && (
                   <div className="field-note">
                     Face retouch uses a small AI model on your PC to find facial features (offline; originals never change). Spots, skin tone, teeth and eyes are then adjusted by auto-correction, not AI generation. Moles and facial features are kept.
-                    <button type="button" className="secondary-button" disabled={previewBusy} onClick={previewRetouch} style={{ marginLeft: 8 }}>
-                      {previewBusy ? <RefreshCw className="spin" size={14}/> : null} Preview on a photo
-                    </button>
                   </div>
                 )}
                 {preview && (
                   <div className="import-summary">
-                    <strong>Retouch preview: {preview.name}</strong>
+                    <strong>Session preview: {preview.name}</strong>
+                    <div className="field-note">Pick a session tone to see it on this photo:</div>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", margin: "6px 0" }}>
+                      {TONES.map((t) => (
+                        <button
+                          key={t.id}
+                          type="button"
+                          className={t.id === look ? "primary-button" : "secondary-button"}
+                          disabled={previewBusy}
+                          onClick={() => previewTone(t.id)}
+                          title={t.hint}
+                          style={{ padding: "4px 10px", fontSize: 12 }}
+                        >
+                          {t.label}
+                        </button>
+                      ))}
+                    </div>
                     <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
                       <figure style={{ margin: 0, flex: 1 }}>
                         <img src={`data:image/jpeg;base64,${preview.before}`} alt="Before" style={{ width: "100%", borderRadius: 6 }} />
-                        <figcaption className="field-note">Before</figcaption>
+                        <figcaption className="field-note">Before (Natural tone)</figcaption>
                       </figure>
                       <figure style={{ margin: 0, flex: 1 }}>
                         <img src={`data:image/jpeg;base64,${preview.after}`} alt="After" style={{ width: "100%", borderRadius: 6 }} />
-                        <figcaption className="field-note">After face retouch</figcaption>
+                        <figcaption className="field-note">After: {TONES.find((t) => t.id === look)?.label}{retouch ? " + face retouch" : ""}</figcaption>
                       </figure>
                     </div>
                     <button type="button" className="secondary-button" onClick={() => setPreview(null)}>Close preview</button>

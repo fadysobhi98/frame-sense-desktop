@@ -5,13 +5,41 @@
 
 use image::{DynamicImage, Rgb32FImage};
 
-/// Session look presets. Honest scope: still deterministic heuristics,
-/// stronger at higher levels, never a creative restyle.
+/// Session tone presets (the app's "session tones"). Honest scope: still
+/// deterministic heuristic grades - per-channel gains, split-toning and
+/// tone-curve shaping, stronger at higher levels, never a creative
+/// restyle, no AI and no LUTs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Look {
     Natural,
     Warm,
     Golden,
+    PeachGold,
+    AmberIndoor,
+    BrightAiry,
+    Cinematic,
+}
+
+/// Grade parameters behind a session tone.
+#[derive(Debug, Clone, Copy)]
+pub struct LookParams {
+    /// Warm white-balance grade strength: 0 = none, 1 = strongest.
+    pub warmth: f32,
+    /// Orange split-tone multiplier on mids/highlights.
+    pub split: f32,
+    /// How far the split-tone reaches into shadows (0 = mids only).
+    pub split_shadow: f32,
+    /// Extra saturation on top of the adaptive amount.
+    pub saturation_boost: f32,
+    /// Peach/magenta tint added with the warm grade (0 = none).
+    pub tint_r: f32,
+    pub tint_g: f32,
+    /// Faded-blacks floor (film look): 0 = none.
+    pub black_floor: f32,
+    /// Creamy highlight shoulder strength: 0 = standard shoulder.
+    pub cream: f32,
+    /// Contrast bias added to the adaptive contrast (can be negative).
+    pub contrast_bias: f32,
 }
 
 impl Look {
@@ -19,23 +47,50 @@ impl Look {
         match v {
             0 => Look::Natural,
             2 => Look::Golden,
+            3 => Look::PeachGold,
+            4 => Look::AmberIndoor,
+            5 => Look::BrightAiry,
+            6 => Look::Cinematic,
             _ => Look::Warm,
         }
     }
-    /// Warm grade strength: 0 = none, 1 = strongest.
-    fn warmth(self) -> f32 {
-        match self {
-            Look::Natural => 0.15,
-            Look::Warm => 0.7,
-            Look::Golden => 1.0,
-        }
+    /// All session tones, in menu order.
+    pub fn all() -> [Look; 7] {
+        [
+            Look::Natural,
+            Look::Warm,
+            Look::Golden,
+            Look::PeachGold,
+            Look::AmberIndoor,
+            Look::BrightAiry,
+            Look::Cinematic,
+        ]
     }
-    /// Extra saturation on top of the adaptive amount.
-    fn saturation_boost(self) -> f32 {
+    fn params(self) -> LookParams {
+        const BASE: LookParams = LookParams {
+            warmth: 0.0,
+            split: 1.0,
+            split_shadow: 0.0,
+            saturation_boost: 0.0,
+            tint_r: 0.0,
+            tint_g: 0.0,
+            black_floor: 0.0,
+            cream: 0.0,
+            contrast_bias: 0.0,
+        };
         match self {
-            Look::Natural => 0.0,
-            Look::Warm => 0.03,
-            Look::Golden => 0.06,
+            Look::Natural => LookParams { warmth: 0.15, split: 0.5, ..BASE },
+            Look::Warm => LookParams { warmth: 0.7, saturation_boost: 0.03, ..BASE },
+            Look::Golden => LookParams { warmth: 1.0, split: 1.15, saturation_boost: 0.06, ..BASE },
+            // Peach-gold: warm with a soft peach tint (kaze-style glow)
+            Look::PeachGold => LookParams { warmth: 0.8, tint_r: 0.020, tint_g: 0.006, saturation_boost: 0.04, cream: 0.4, ..BASE },
+            // Amber indoor: deep warm for tungsten venues, split reaches shadows
+            Look::AmberIndoor => LookParams { warmth: 0.9, split: 1.2, split_shadow: 0.35, saturation_boost: 0.04, ..BASE },
+            // Bright airy: gentle warmth, lifted blacks, soft contrast (wedding)
+            Look::BrightAiry => LookParams { warmth: 0.45, split: 0.6, saturation_boost: 0.02, black_floor: 0.025, cream: 0.6, contrast_bias: -0.03, ..BASE },
+            // Cinematic: film-like faded blacks, creamy highlights, slightly
+            // restrained saturation
+            Look::Cinematic => LookParams { warmth: 0.55, split: 0.85, saturation_boost: -0.02, black_floor: 0.05, cream: 1.0, contrast_bias: -0.02, ..BASE },
         }
     }
 }
@@ -68,6 +123,17 @@ pub struct CorrectionPlan {
     pub saturation: f32,
     /// Warm grade strength from the session look (0..1).
     pub warmth: f32,
+    /// Orange split-tone multiplier.
+    pub split: f32,
+    /// Split-tone reach into shadows (0..1).
+    pub split_shadow: f32,
+    /// Peach tint added with warmth.
+    pub tint_r: f32,
+    pub tint_g: f32,
+    /// Faded blacks floor (0 = none).
+    pub black_floor: f32,
+    /// Creamy highlight shoulder strength.
+    pub cream: f32,
     /// Additive lift for dark tones (backlit subjects), 0 = none.
     pub shadow_lift: f32,
     /// Highlight pull-down strength (bright sky / clothes), 0 = none.
@@ -213,6 +279,12 @@ pub fn plan_from_lumas(sorted_lumas: &[f32]) -> CorrectionPlan {
         skin_warmth: 0.0,
         saturation: 1.0,
         warmth: 0.0,
+        split: 1.0,
+        split_shadow: 0.0,
+        tint_r: 0.0,
+        tint_g: 0.0,
+        black_floor: 0.0,
+        cream: 0.0,
         shadow_lift,
         highlight_compress,
     }
@@ -225,7 +297,15 @@ pub fn plan_for_image(rgb: &Rgb32FImage, look: Look) -> CorrectionPlan {
     let mut plan = plan_from_lumas(&lumas);
     let stats = channel_stats(rgb);
     plan.wb = white_balance_gains(&stats);
-    plan.warmth = look.warmth();
+    let lp = look.params();
+    plan.warmth = lp.warmth;
+    plan.split = lp.split;
+    plan.split_shadow = lp.split_shadow;
+    plan.tint_r = lp.tint_r;
+    plan.tint_g = lp.tint_g;
+    plan.black_floor = lp.black_floor;
+    plan.cream = lp.cream;
+    plan.contrast_mix = (plan.contrast_mix + lp.contrast_bias).clamp(0.05, 0.25);
     // Skin: nudge median skin hue toward a warm natural ~38 deg, max +-4 deg.
     if let Some(h) = stats.skin_hue_median {
         plan.skin_warmth = ((38.0 - h) / 38.0 * 0.10).clamp(-0.04, 0.04);
@@ -233,7 +313,7 @@ pub fn plan_for_image(rgb: &Rgb32FImage, look: Look) -> CorrectionPlan {
     // Dull photos get a touch of saturation, lively ones stay put; the
     // chosen look adds a little more.
     plan.saturation = ((1.0 + (0.10 - stats.mean_chroma) * 0.6).clamp(1.0, 1.07)
-        + look.saturation_boost())
+        + lp.saturation_boost)
     .clamp(1.0, 1.13);
     plan
 }
@@ -264,9 +344,15 @@ pub fn apply_plan(rgb: &mut Rgb32FImage, plan: &CorrectionPlan) {
             r *= 1.0 + 0.16 * w;
             g *= 1.0 - 0.032 * w;
             b *= 1.0 - 0.185 * w;
-            // orange split-tone on mids/highlights only
+            // optional peach tint riding the warm grade
+            if plan.tint_r != 0.0 || plan.tint_g != 0.0 {
+                r += plan.tint_r * w * (1.0 - r);
+                g += plan.tint_g * w * (1.0 - g);
+            }
+            // orange split-tone on mids/highlights (optionally into shadows)
             let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-            let t = smoothstep(((luma - 0.30) / 0.55).clamp(0.0, 1.0)) * w;
+            let lo = 0.30 - 0.15 * plan.split_shadow;
+            let t = smoothstep(((luma - lo) / (0.55 + 0.15 * plan.split_shadow)).clamp(0.0, 1.0)) * w * plan.split;
             r += 0.055 * t * (1.0 - r);
             g += 0.012 * t * (1.0 - g);
             b -= 0.05 * t * b;
@@ -282,6 +368,10 @@ pub fn apply_plan(rgb: &mut Rgb32FImage, plan: &CorrectionPlan) {
         for (i, channel) in pixel.0.iter_mut().enumerate() {
             // Exposure gain, small black-point floor, optional dull-image lift.
             let mut x = (channels[i] * plan.gain - plan.black_point).max(0.0);
+            // faded blacks (film floor) before gamma
+            if plan.black_floor > 0.0 {
+                x = plan.black_floor + x * (1.0 - plan.black_floor);
+            }
             x = x.powf(plan.gamma);
             // Open up shadows (backlit subjects): lifts dark tones most,
             // fades out by mid-gray.
@@ -295,8 +385,11 @@ pub fn apply_plan(rgb: &mut Rgb32FImage, plan: &CorrectionPlan) {
                 x = 0.80 + t / (1.0 + plan.highlight_compress * 8.0 * t);
             }
             // Soft highlight shoulder: eases into 1.0 instead of clipping.
-            if x > 0.95 {
-                x = 0.95 + 0.05 * (1.0 - (-(x - 0.95) / 0.05).exp());
+            // "Cream" starts the shoulder earlier and stretches it wider.
+            let sh = 0.95 - 0.10 * plan.cream.min(1.0);
+            let sw = 0.05 + 0.05 * plan.cream.min(1.0);
+            if x > sh {
+                x = sh + sw * (1.0 - (-(x - sh) / sw).exp());
             }
             let curved = x + plan.contrast_mix * (smoothstep(x) - x);
             *channel = curved.clamp(0.0, 1.0);
@@ -468,7 +561,7 @@ mod tests {
         for (i, p) in img.pixels_mut().enumerate() {
             *p = image::Rgb([i as f32 / 16.0, 0.5, 1.0 - i as f32 / 16.0]);
         }
-        let plan = CorrectionPlan { gain: 2.0, black_point: 0.05, gamma: 1.0, contrast_mix: 0.2, wb: (1.0, 1.0, 1.0), skin_warmth: 0.0, saturation: 1.0, warmth: 0.0, shadow_lift: 0.0, highlight_compress: 0.0 };
+        let plan = CorrectionPlan { gain: 2.0, black_point: 0.05, gamma: 1.0, contrast_mix: 0.2, wb: (1.0, 1.0, 1.0), skin_warmth: 0.0, saturation: 1.0, warmth: 0.0, split: 1.0, split_shadow: 0.0, tint_r: 0.0, tint_g: 0.0, black_floor: 0.0, cream: 0.0, shadow_lift: 0.0, highlight_compress: 0.0 };
         apply_plan(&mut img, &plan);
         for p in img.pixels() {
             for c in p.0 {

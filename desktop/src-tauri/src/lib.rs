@@ -359,6 +359,7 @@ async fn auto_correct_folder(
         reset_processing_control();
         let quality = quality.unwrap_or(core::DEFAULT_JPEG_QUALITY);
         let look_num = look_code(look.as_deref());
+        let want_retouch = retouch.unwrap_or(false);
         let bw = bw.unwrap_or(true);
         let retouch = retouch.unwrap_or(false);
         let correct = move |src: &Path, dst: &Path, q: u8| {
@@ -387,6 +388,10 @@ fn look_code(look: Option<&str>) -> u8 {
     match look {
         Some("natural") => 0,
         Some("golden") => 2,
+        Some("peach") => 3,
+        Some("amber") => 4,
+        Some("airy") => 5,
+        Some("cinematic") => 6,
         _ => 1, // warm is the default
     }
 }
@@ -408,6 +413,7 @@ async fn auto_correct_camera(
         reset_processing_control();
         let quality = quality.unwrap_or(core::DEFAULT_JPEG_QUALITY);
         let look_num = look_code(look.as_deref());
+        let want_retouch = retouch.unwrap_or(false);
         let bw = bw.unwrap_or(true);
         let retouch = retouch.unwrap_or(false);
         let correct = move |src: &Path, dst: &Path, q: u8| {
@@ -432,11 +438,14 @@ async fn auto_correct_camera(
     .map_err(|e| format!("processing failed to run: {e}"))?
 }
 
-/// Before/after preview for face retouch: [without, with] as base64 JPEGs.
+/// Session preview on one photo: [baseline, chosen] as base64 JPEGs.
+/// Baseline is the Natural tone without retouch; chosen is the selected
+/// session tone, with face retouch when `retouch` is true.
 #[command]
 async fn retouch_preview(
     photo_path: String,
     look: Option<String>,
+    retouch: Option<bool>,
 ) -> Result<[String; 2], String> {
     tauri::async_runtime::spawn_blocking(move || {
         let engine = engine()?;
@@ -444,13 +453,14 @@ async fn retouch_preview(
             .preview_jpeg
             .ok_or_else(|| "This engine build has no preview support.".to_string())?;
         let look_num = look_code(look.as_deref());
+        let want_retouch = retouch.unwrap_or(false);
         let src = PathBuf::from(&photo_path);
         let src_c = CString::new(photo_path.as_bytes())
             .map_err(|_| "photo path is not representable".to_string())?;
         if !src.is_file() {
             return Err("photo not found".to_string());
         }
-        let run_one = |retouch: u8| -> Result<String, String> {
+        let run_one = |look: u8, retouch: u8| -> Result<String, String> {
             let (ort_c, models_c) = if retouch == 1 {
                 (
                     Some(CString::new(ort_library_path()?.to_string_lossy().as_bytes()).map_err(|_| "onnxruntime path is not representable".to_string())?),
@@ -463,7 +473,7 @@ async fn retouch_preview(
                 preview(
                     src_c.as_ptr(),
                     1400,
-                    look_num,
+                    look,
                     retouch,
                     ort_c.as_ref().map(|c| c.as_ptr()).unwrap_or(std::ptr::null()),
                     models_c.as_ref().map(|c| c.as_ptr()).unwrap_or(std::ptr::null()),
@@ -476,8 +486,8 @@ async fn retouch_preview(
                 Ok(unsafe { engine_string(engine, ptr) })
             }
         };
-        let before = run_one(0)?;
-        let after = run_one(1)?;
+        let before = run_one(0, 0)?; // Natural tone, no retouch: honest baseline
+        let after = run_one(look_num, if want_retouch { 1 } else { 0 })?;
         Ok([before, after])
     })
     .await
