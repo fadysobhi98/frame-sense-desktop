@@ -1,0 +1,339 @@
+import { useEffect, useMemo, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import {
+  Maximize2, Minimize2, Aperture, ArrowDownToLine, Bell, CheckCircle2, ChevronRight, CircleHelp,
+  Clapperboard, Command, Cpu, FolderOpen, Gauge, HardDrive, Image,
+  Layers3, LayoutDashboard, Palette, Plus, RefreshCw, ScanFace, Settings2,
+  ShieldCheck, Smartphone, Sparkles, Upload, WandSparkles, Wifi, XCircle
+} from "lucide-react";
+import frameSenseLogo from "../frame-sense-logo.png.png";
+type Page =
+  | "Dashboard" | "Projects & Import" | "Processing Center" | "Photo Gallery"
+  | "Quality Review" | "AI Creative Studio" | "Collage Studio"
+  | "Export & Delivery" | "Device Center" | "Settings & AI Engine";
+
+type CreateProjectResult = {
+  project_id: string;
+  project_name: string;
+  project_path: string;
+};
+
+type ImportResult = {
+  imported: number;
+  duplicates: number;
+  skipped_unsupported: number;
+  camera_id: string;
+  destination: string;
+};
+
+const nav: { name: Page; icon: typeof LayoutDashboard }[] = [
+  { name: "Dashboard", icon: LayoutDashboard },
+  { name: "Projects & Import", icon: FolderOpen },
+  { name: "Processing Center", icon: Gauge },
+  { name: "Photo Gallery", icon: Image },
+  { name: "Quality Review", icon: ShieldCheck },
+  { name: "AI Creative Studio", icon: Sparkles },
+  { name: "Collage Studio", icon: Layers3 },
+  { name: "Export & Delivery", icon: ArrowDownToLine },
+  { name: "Device Center", icon: Smartphone },
+  { name: "Settings & AI Engine", icon: Settings2 }
+];
+
+const plannedCopy: Record<Page, string> = {
+  "Dashboard": "",
+  "Projects & Import": "",
+  "Processing Center": "Queue execution, pause/resume dependencies and detailed per-camera processing are planned after the project/import foundation.",
+  "Photo Gallery": "RAW decoding, previews, filtering and non-destructive edit controls are planned. Original files remain untouched.",
+  "Quality Review": "AI Smart Review & Repair is not connected yet. This screen is reserved for human approval after real analysis is integrated.",
+  "AI Creative Studio": "Local AI model integration and Creative Set generation are planned. No cloud AI is required by the approved specification.",
+  "Collage Studio": "Collage composition and export are planned. This screen is not a functioning editor yet.",
+  "Export & Delivery": "Production JPEG 8-bit export, ICC validation, metadata and ZIP delivery are planned.",
+  "Device Center": "QR pairing, encrypted transfer, remote gallery and device permissions are planned.",
+  "Settings & AI Engine": "AI model version lock, Smart Power, Smart Storage and performance controls are planned."
+};
+
+function App() {
+  const [page, setPage] = useState<Page>("Dashboard");
+  const [theme, setTheme] = useState<"graphite" | "obsidian">("graphite");
+  const [clientName, setClientName] = useState("");
+  const [eventType, setEventType] = useState("Wedding");
+  const [eventDate, setEventDate] = useState(new Date().toISOString().slice(0, 10));
+  const [baseDirectory, setBaseDirectory] = useState("");
+  const [sourcePath, setSourcePath] = useState("");
+  const [cameraId, setCameraId] = useState("Camera 1");
+  const [projectPath, setProjectPath] = useState("");
+  const [projectName, setProjectName] = useState("");
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [importResult, setImportResult] = useState<ImportResult | null>(null);
+const [isFullscreen, setIsFullscreen] = useState(false);
+
+useEffect(() => {
+  const appWindow = getCurrentWindow();
+  let mounted = true;
+
+  appWindow.isFullscreen().then((value) => {
+    if (mounted) setIsFullscreen(value);
+  }).catch(console.error);
+
+  const handleKeyDown = async (event: KeyboardEvent) => {
+    try {
+      if (event.key === "F11") {
+        event.preventDefault();
+        const next = !(await appWindow.isFullscreen());
+        await appWindow.setFullscreen(next);
+        if (mounted) setIsFullscreen(next);
+      }
+
+      if (event.key === "Escape") {
+        await appWindow.setFullscreen(false);
+        if (mounted) setIsFullscreen(false);
+      }
+    } catch (error) {
+      console.error(error);
+    }
+  };
+
+  window.addEventListener("keydown", handleKeyDown);
+
+  return () => {
+    mounted = false;
+    window.removeEventListener("keydown", handleKeyDown);
+  };
+}, []);
+
+const toggleFullscreen = async () => {
+  try {
+    const appWindow = getCurrentWindow();
+    const next = !(await appWindow.isFullscreen());
+    await appWindow.setFullscreen(next);
+    setIsFullscreen(next);
+  } catch (error) {
+    console.error(error);
+  }
+};
+  const currentIcon = useMemo(() => nav.find((n) => n.name === page)?.icon ?? LayoutDashboard, [page]);
+  const CurrentIcon = currentIcon;
+
+  async function createProject() {
+    setError(""); setMessage(""); setBusy(true);
+    try {
+      const result = await invoke<CreateProjectResult>("create_project", {
+        baseDirectory, clientName, eventType, eventDate
+      });
+      setProjectPath(result.project_path);
+      setProjectName(result.project_name);
+      setMessage(`Project created: ${result.project_name}`);
+      setPage("Projects & Import");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function importFiles() {
+    setError(""); setMessage(""); setImportResult(null); setBusy(true);
+    try {
+      const result = await invoke<ImportResult>("import_camera_files", {
+        projectPath, sourcePath, cameraId
+      });
+      setImportResult(result);
+      setMessage(`Import finished for ${result.camera_id}.`);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className={`app-shell theme-${theme}`}>
+      <aside className="sidebar">
+        <div className="brand">
+<div className="brand-mark">
+  <img src={frameSenseLogo} alt="Frame Sense" />
+</div>   
+       <div><strong>FRAME SENSE</strong><small>AI PHOTOGRAPHY SUITE</small></div>
+        </div>
+        <div className="workspace-label">WORKSPACE</div>
+        <nav>
+          {nav.map((item) => {
+            const Icon = item.icon;
+            return (
+              <button key={item.name} className={`nav-item ${page === item.name ? "active" : ""}`} onClick={() => setPage(item.name)}>
+                <Icon size={17} /><span>{item.name}</span>
+                {page === item.name && <ChevronRight size={15} className="nav-chevron" />}
+              </button>
+            );
+          })}
+        </nav>
+        <div className="sidebar-bottom">
+          <div className="local-pill"><span className="pulse-dot" /> LOCAL WORKSPACE</div>
+          <div className="sidebar-foot"><ShieldCheck size={14} /> Photos stay on this computer</div>
+        </div>
+      </aside>
+
+      <main className="main-area">
+        <header className="topbar">
+          <div className="breadcrumbs"><span>Frame Sense</span><ChevronRight size={14} /><strong>{page}</strong></div>
+          <div className="top-actions">
+            <span className="engine-status"><span className="status-dot" /> Foundation Preview</span>
+            <button
+  className="icon-button"
+  title={isFullscreen ? "Exit Fullscreen" : "Enter Fullscreen"}
+  onClick={toggleFullscreen}
+>
+  {isFullscreen ? <Minimize2 size={17} /> : <Maximize2 size={17} />}
+</button>
+            <button className="icon-button" title="Notifications"><Bell size={17} /></button>
+            <button className="profile-button">FS</button>
+          </div>
+        </header>
+
+        <div className="content">
+          <div className="page-heading">
+            <div>
+              <div className="eyebrow">FRAME SENSE / WORKSPACE</div>
+              <h1>{page}</h1>
+              <p>{page === "Dashboard" ? "Your local photography workflow, organized and protected." : "A structured foundation for the approved Frame Sense workflow."}</p>
+            </div>
+            <div className="theme-switch">
+              <Palette size={15} />
+              <button className={theme === "graphite" ? "selected" : ""} onClick={() => setTheme("graphite")}>Graphite</button>
+              <button className={theme === "obsidian" ? "selected" : ""} onClick={() => setTheme("obsidian")}>Obsidian</button>
+            </div>
+          </div>
+
+          {message && <div className="notice success"><CheckCircle2 size={17} />{message}<button onClick={() => setMessage("")}><XCircle size={15}/></button></div>}
+          {error && <div className="notice error"><XCircle size={17} />{error}<button onClick={() => setError("")}><XCircle size={15}/></button></div>}
+
+          {page === "Dashboard" && (
+            <>
+              <section className="hero-panel">
+                <div className="hero-copy">
+                  <div className="hero-kicker"><Sparkles size={14}/> LOCAL-FIRST PHOTO WORKFLOW</div>
+                  <h2>Every frame.<br/><em>In its right place.</em></h2>
+                  <p>One active order at a time. Two independent camera lanes. Original RAW files stay untouched.</p>
+                  <button className="primary-button" onClick={() => setPage("Projects & Import")}><Plus size={16}/> Create a project</button>
+                </div>
+                <div className="hero-orbit"><div className="orbit orbit-one"/><div className="orbit orbit-two"/><div className="orbit-core"><Aperture size={48}/></div><span className="orbit-tag tag-a">RAW SAFE</span><span className="orbit-tag tag-b">LOCAL AI</span></div>
+              </section>
+
+              <div className="stats-grid">
+                <div className="stat-card"><div className="stat-icon"><FolderOpen size={18}/></div><span>Current project</span><strong>{projectName || "No project yet"}</strong><small>{projectPath || "Create a project to begin"}</small></div>
+                <div className="stat-card"><div className="stat-icon"><Cpu size={18}/></div><span>Processing policy</span><strong>One active order</strong><small>Camera 1 + Camera 2 independent</small></div>
+                <div className="stat-card"><div className="stat-icon"><HardDrive size={18}/></div><span>Original files</span><strong>RAW preserved</strong><small>No source modification by import</small></div>
+                <div className="stat-card"><div className="stat-icon"><ShieldCheck size={18}/></div><span>Export target</span><strong>JPEG · 8-bit</strong><small>sRGB default · Adobe RGB optional</small></div>
+              </div>
+
+              <div className="section-title"><div><h3>Start here</h3><p>Only the foundation actions below are connected in this starter.</p></div></div>
+              <div className="quick-grid">
+                <button className="quick-card" onClick={() => setPage("Projects & Import")}><FolderOpen/><strong>Projects & Import</strong><span>Create project and safely copy card files</span><ChevronRight/></button>
+                <button className="quick-card" onClick={() => setPage("Processing Center")}><Gauge/><strong>Processing Center</strong><span>Reserved for the single-order queue</span><ChevronRight/></button>
+                <button className="quick-card" onClick={() => setPage("Settings & AI Engine")}><WandSparkles/><strong>AI Engine</strong><span>Local model manager planned</span><ChevronRight/></button>
+              </div>
+            </>
+          )}
+
+          {page === "Projects & Import" && (
+            <div className="two-column">
+              <section className="panel">
+                <div className="panel-heading"><div><span className="step-tag">01 / PROJECT</span><h3>Create a project</h3><p>Creates the project root, camera folders and local SQLite metadata.</p></div><FolderOpen/></div>
+                <label>Client name<input value={clientName} onChange={(e) => setClientName(e.target.value)} placeholder="Client name"/></label>
+                <label>Event type<input value={eventType} onChange={(e) => setEventType(e.target.value)} placeholder="Wedding / Event"/></label>
+                <label>Event date<input type="date" value={eventDate} onChange={(e) => setEventDate(e.target.value)}/></label>
+<label>Parent folder on this computer</label>
+
+<div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+  <input
+    value={baseDirectory}
+    readOnly
+    placeholder="Choose a parent folder..."
+    style={{ flex: 1, minWidth: 0 }}
+  />
+
+  <button
+    type="button"
+    className="secondary-button"
+    onClick={async () => {
+      const selected = await openDialog({
+        directory: true,
+        multiple: false,
+        title: "Choose project parent folder",
+      });
+
+      if (typeof selected === "string") {
+        setBaseDirectory(selected);
+      }
+    }}
+  >
+    <FolderOpen size={16} />
+    Browse
+  </button>
+</div>                <button className="primary-button full" disabled={busy || !clientName.trim() || !baseDirectory.trim()} onClick={createProject}>{busy ? <RefreshCw className="spin" size={16}/> : <Plus size={16}/>} Create local project</button>
+                <p className="field-note">Choose an existing parent folder. The app creates a new project folder inside it.</p>
+              </section>
+
+              <section className="panel">
+                <div className="panel-heading"><div><span className="step-tag">02 / CARD IMPORT</span><h3>Import to a camera</h3><p>Byte-copy import with SHA-256 verification. Source files are not edited.</p></div><Upload/></div>
+                <label>Project folder<input value={projectPath} onChange={(e) => setProjectPath(e.target.value)} placeholder="Create a project first, or paste its path"/></label>
+                <label>Camera destination<select value={cameraId} onChange={(e) => setCameraId(e.target.value)}><option>Camera 1</option><option>Camera 2</option></select></label>
+                <label>Card/source folder path<input value={sourcePath} onChange={(e) => setSourcePath(e.target.value)} placeholder="Example: E:\"/></label>
+                <button className="secondary-button full" disabled={busy || !projectPath.trim() || !sourcePath.trim()} onClick={importFiles}>{busy ? <RefreshCw className="spin" size={16}/> : <ArrowDownToLine size={16}/>} Copy files safely</button>
+                {importResult && <div className="import-summary"><strong>Import report</strong><span>Imported: {importResult.imported}</span><span>Duplicates skipped: {importResult.duplicates}</span><span>Unsupported skipped: {importResult.skipped_unsupported}</span><small>{importResult.destination}</small></div>}
+                <p className="field-note">This starter copies supported photo/RAW file bytes only. It does not decode RAW or start AI processing.</p>
+              </section>
+            </div>
+          )}
+
+          {page !== "Dashboard" && page !== "Projects & Import" && (
+            <section className="planned-panel">
+              <div className="planned-icon"><CurrentIcon size={28}/></div>
+              <span className="step-tag">ROADMAP MODULE</span>
+              <h2>{page}</h2>
+              <p>{plannedCopy[page]}</p>
+              <div className="planned-status"><span className="status-dot muted"/> Planned – not implemented in this starter</div>
+              <button className="secondary-button" onClick={() => setPage("Projects & Import")}><FolderOpen size={16}/> Go to project foundation</button>
+            </section>
+          )}
+
+          <footer className="content-footer">
+            <span><ShieldCheck size={14}/> Local-first by design</span>
+            <span><CircleHelp size={14}/> Starter scaffold · not a finished product</span>
+            <span><Command size={14}/> v0.1.0</span>
+          </footer>
+        </div>
+      </main>
+
+      <aside className="right-panel">
+        <div className="right-head"><span>PROJECT INSPECTOR</span><button className="icon-button"><Settings2 size={16}/></button></div>
+        <div className="inspector-block">
+          <div className="inspector-label">ACTIVE PROJECT</div>
+          <div className="project-mini"><div className="project-mini-icon"><Clapperboard size={18}/></div><div><strong>{projectName || "No project selected"}</strong><small>{projectPath ? "Local project" : "Waiting for project creation"}</small></div></div>
+          {projectPath && <div className="path-box">{projectPath}</div>}
+        </div>
+        <div className="inspector-block">
+          <div className="inspector-label">WORKFLOW RULES</div>
+          <div className="rule-row"><CheckCircle2 size={15}/><span>One active order</span></div>
+          <div className="rule-row"><CheckCircle2 size={15}/><span>Camera lanes stay separate</span></div>
+          <div className="rule-row"><CheckCircle2 size={15}/><span>RAW source is immutable</span></div>
+          <div className="rule-row"><CheckCircle2 size={15}/><span>JPEG 8-bit final output</span></div>
+        </div>
+        <div className="inspector-block">
+          <div className="inspector-label">ENGINE STATUS</div>
+          <div className="engine-row"><span>RAW Engine</span><b className="status-planned">Not connected</b></div>
+          <div className="engine-row"><span>Local AI</span><b className="status-planned">Not connected</b></div>
+          <div className="engine-row"><span>Color Pipeline</span><b className="status-planned">Not connected</b></div>
+          <div className="engine-row"><span>Remote Sync</span><b className="status-planned">Not connected</b></div>
+        </div>
+        <div className="inspector-note"><ShieldCheck size={17}/><p>Import preserves the source. RAW development and AI processing are not enabled in this starter.</p></div>
+      </aside>
+    </div>
+  );
+}
+
+export default App;

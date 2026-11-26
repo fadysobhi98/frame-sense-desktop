@@ -1,0 +1,6 @@
+{
+  "editor.formatOnSave": true,
+  "files.eol": "\n",
+  "typescript.preferences.importModuleSpecifier": "relative",
+  "rust-analyzer.check.command": "clippy"
+}

@@ -1,0 +1,6 @@
+{
+  "projectStatuses": ["Completed", "Review Required", "Error"],
+  "orderStatuses": ["Waiting", "Processing", "Paused", "Completed", "Review Required", "Error"],
+  "cameraIds": ["Camera 1", "Camera 2"],
+  "processingRule": "At most one order may be Processing globally. Camera 1 and Camera 2 may progress independently within that one order."
+}

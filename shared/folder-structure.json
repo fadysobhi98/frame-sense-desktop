@@ -1,0 +1,32 @@
+{
+  "rootPattern": "Client Name - Event Type - Date",
+  "folders": {
+    "Originals": ["Camera 1", "Camera 2"],
+    "Export": {
+      "Camera 1": [
+        "Makeup",
+        "Getting Ready",
+        "Session",
+        "Best Shots",
+        "Church",
+        "Hall & Party",
+        "Crop",
+        "Instagram Ready",
+        "AI Creative Set",
+        "Collages",
+        "Quality Review"
+      ],
+      "Camera 2": "Same relevant independent sections"
+    },
+    "Mobile Edits": [],
+    "Project Data": []
+  },
+  "rules": [
+    "Create category folders only when relevant; do not create empty categories.",
+    "Best Shots contains Session-only copies; originals remain in Session.",
+    "Church and Katb Ketab remain together.",
+    "Makeup is separate from Getting Ready.",
+    "Hall & Party categories are AI-selected from actual content.",
+    "Do not create a Sorted RAW duplicate folder."
+  ]
+}

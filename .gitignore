@@ -1,0 +1,32 @@
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/*.log
+
+# Node
+node_modules/
+dist/
+
+# Rust / Tauri
+target/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/schemas/
+
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+coverage/
+
+# Local app/project data
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.env
+.env.*
+
+# Product specification documents stay local; they are not published to GitHub.
+docs/FRAME_SENSE_MASTER_SPECIFICATION_AR_V1.1.docx
+docs/FRAME_SENSE_MASTER_SPECIFICATION_AR_V1.1.md

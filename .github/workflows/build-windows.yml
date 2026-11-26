@@ -1,0 +1,43 @@
+name: Build Windows installer
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend dependencies
+        working-directory: desktop
+        run: npm ci
+
+      - name: Run core tests (project creation + safe import)
+        working-directory: desktop/src-tauri
+        run: cargo test
+
+      - name: Build the app and create a GitHub Release with the installer
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: desktop
+          tagName: frame-sense-v__VERSION__
+          releaseName: "Frame Sense v__VERSION__"
+          releaseBody: "Windows installer. Download the Frame Sense .exe under Assets, open it, and follow the installer."
+          releaseDraft: false
+          prerelease: true

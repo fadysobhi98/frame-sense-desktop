@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Frame Sense Project Metadata",
+  "type": "object",
+  "required": ["schemaVersion", "projectId", "clientName", "eventType", "eventDate", "createdAt", "cameras", "output"],
+  "properties": {
+    "schemaVersion": {"type": "integer", "const": 1},
+    "projectId": {"type": "string", "format": "uuid"},
+    "clientName": {"type": "string", "minLength": 1},
+    "eventType": {"type": "string", "minLength": 1},
+    "eventDate": {"type": "string"},
+    "createdAt": {"type": "string"},
+    "cameras": {
+      "type": "array",
+      "items": {"enum": ["Camera 1", "Camera 2"]},
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "format": {"const": "JPEG"},
+        "bitDepth": {"const": 8},
+        "qualityMin": {"const": 50},
+        "qualityMax": {"const": 100},
+        "defaultColorSpace": {"const": "sRGB"},
+        "optionalColorSpace": {"const": "Adobe RGB"},
+        "preserveOriginalDimensionsByDefault": {"const": true}
+      },
+      "required": ["format", "bitDepth", "qualityMin", "qualityMax", "defaultColorSpace", "optionalColorSpace", "preserveOriginalDimensionsByDefault"]
+    }
+  }
+}
