@@ -1039,7 +1039,10 @@ mod tests {
             &|_| {},
         )
         .unwrap();
-        assert!(report.output_dir.starts_with(picked.path().to_str().unwrap()));
+        let picked_canonical = picked.path().canonicalize().unwrap();
+        assert!(report
+            .output_dir
+            .starts_with(picked_canonical.to_string_lossy().as_ref()));
         assert!(PathBuf::from(&report.output_dir).join("IMG_0001.jpg").exists());
 
         let bad = run_auto_correct(
