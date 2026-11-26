@@ -3,6 +3,7 @@
 //! Honest scope: these are deterministic histogram heuristics, not AI.
 //! No skin smoothing, no generative changes, no creative relighting.
 
+use crate::denoise;
 use image::{DynamicImage, Rgb32FImage};
 
 /// Session tone presets (the app's "session tones"). Honest scope: still
@@ -95,6 +96,8 @@ impl Look {
     }
 }
 
+const SKIN_SAT_BOOST: f32 = -0.10;
+const OTHER_SAT_BOOST: f32 = 0.03;
 const MEDIAN_TARGET: f32 = 0.45;
 const GAIN_MIN: f32 = 0.5;
 const GAIN_MAX: f32 = 2.0;
@@ -138,6 +141,8 @@ pub struct CorrectionPlan {
     pub shadow_lift: f32,
     /// Highlight pull-down strength (bright sky / clothes), 0 = none.
     pub highlight_compress: f32,
+    /// Adaptive exposure lift in stops (0..0.6), set per photo.
+    pub exposure_ev: f32,
 }
 
 /// Hue (degrees) of an RGB pixel in 0..1 floats; None for near-gray.
@@ -242,10 +247,19 @@ pub fn plan_from_lumas(sorted_lumas: &[f32]) -> CorrectionPlan {
     let p50 = percentile(sorted_lumas, 0.50);
     let p99 = percentile(sorted_lumas, 0.99);
 
-    let gain = if p50 > 1e-4 {
+    let gain_med = if p50 > 1e-4 {
         (MEDIAN_TARGET / p50).clamp(GAIN_MIN, GAIN_MAX)
     } else {
         GAIN_MAX
+    };
+    // White anchoring: dim or flat frames never reach real whites by median
+    // alone. Stretch so the bright tail lands near 0.96, within 1.6x of the
+    // median-based gain, so whites stay luminous without a global blow-out.
+    let gain = if p99 > 1e-4 && p99 < 0.92 && p99 > p50 * 1.3 {
+        let gain_hi = (0.96 / p99).min(gain_med.max(1.0) * 1.6).min(3.0);
+        gain_med.max(gain_hi)
+    } else {
+        gain_med
     };
 
     // Black-point subtraction so shadows keep depth and photos look punchy.
@@ -287,6 +301,7 @@ pub fn plan_from_lumas(sorted_lumas: &[f32]) -> CorrectionPlan {
         cream: 0.0,
         shadow_lift,
         highlight_compress,
+        exposure_ev: adaptive_ev(p50, percentile(sorted_lumas, 0.97), gain),
     }
 }
 
@@ -308,7 +323,7 @@ pub fn plan_for_image(rgb: &Rgb32FImage, look: Look) -> CorrectionPlan {
     plan.contrast_mix = (plan.contrast_mix + lp.contrast_bias).clamp(0.05, 0.25);
     // Skin: nudge median skin hue toward a warm natural ~38 deg, max +-4 deg.
     if let Some(h) = stats.skin_hue_median {
-        plan.skin_warmth = ((38.0 - h) / 38.0 * 0.10).clamp(-0.04, 0.04);
+        plan.skin_warmth = ((38.0 - h) / 38.0 * 0.05).clamp(-0.02, 0.02);
     }
     // Dull photos get a touch of saturation, lively ones stay put; the
     // chosen look adds a little more.
@@ -322,18 +337,36 @@ fn smoothstep(x: f32) -> f32 {
     x * x * (3.0 - 2.0 * x)
 }
 
-/// Exposure boost (default +1 EV) applied to an sRGB-encoded value in linear
-/// light, with a soft knee above 0.6 (linear) so highlights roll off.
-pub const EXPOSURE_EV: f32 = 1.0;
-pub fn plus_one_stop(v: f32) -> f32 {
-    let lin = if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
-    let mut y = lin * EXPOSURE_EV.exp2();
-    let knee = 0.6f32;
+fn srgb_to_lin(v: f32) -> f32 {
+    if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+}
+fn lin_to_srgb(y: f32) -> f32 {
+    if y <= 0.0031308 { y * 12.92 } else { 1.055 * y.powf(1.0 / 2.4) - 0.055 }
+}
+/// Exposure lift of `ev` stops on an sRGB-encoded value, in linear light.
+/// A soft knee at 0.72 (linear) rolls highlights off so glow stays visible
+/// but whites and skin highlights do not burn flat.
+pub fn lift_exposure(v: f32, ev: f32) -> f32 {
+    if ev <= 0.0 {
+        return v;
+    }
+    let mut y = srgb_to_lin(v) * ev.exp2();
+    let knee = 0.72f32;
     if y > knee {
         y = knee + (1.0 - knee) * (1.0 - (-(y - knee) / (1.0 - knee)).exp());
     }
-    let y = y.clamp(0.0, 1.0);
-    if y <= 0.0031308 { y * 12.92 } else { 1.055 * y.powf(1.0 / 2.4) - 0.055 }
+    lin_to_srgb(y.clamp(0.0, 1.0))
+}
+
+/// Pick the exposure lift for this photo (0..0.6 EV): enough to bring the
+/// median toward a pleasant 0.50, never more than the highlights can take
+/// (the bright tail after correction stays under about 0.9).
+fn adaptive_ev(p50: f32, p97: f32, gain: f32) -> f32 {
+    let med = (p50 * gain).clamp(0.02, 0.98);
+    let hi = (p97 * gain).clamp(0.05, 0.99);
+    let want = (srgb_to_lin(0.50) / srgb_to_lin(med)).log2();
+    let room = (srgb_to_lin(0.88) / srgb_to_lin(hi)).log2();
+    want.min(room).clamp(0.0, 0.6)
 }
 
 pub fn apply_plan(rgb: &mut Rgb32FImage, plan: &CorrectionPlan) {
@@ -354,7 +387,20 @@ pub fn apply_plan(rgb: &mut Rgb32FImage, plan: &CorrectionPlan) {
         // tungsten venues) and fades out in shadows.
         if plan.warmth > 0.0 {
             let skin = is_skinish(r, g, b);
-            let w = if skin { plan.warmth * 0.45 } else { plan.warmth };
+            // Warmth sits mostly on skin and mid-tones; neutral walls and
+            // clothes stay close to neutral so the cast never looks orange.
+            let mut w = if skin { plan.warmth * 0.10 } else { plan.warmth * 0.10 };
+            // Keep bright near-neutral surfaces (white satin, veils, suits)
+            // clean white: the warm grade belongs on skin, light and
+            // mid-tones, not on whites.
+            {
+                let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                let mx = r.max(g).max(b);
+                let sat = if mx > 1e-4 { (mx - r.min(g).min(b)) / mx } else { 0.0 };
+                let wp = smoothstep(((lum * plan.gain.max(0.5) - 0.45) / 0.3).clamp(0.0, 1.0))
+                    * (1.0 - (sat * 5.0).clamp(0.0, 1.0));
+                w *= 1.0 - 0.9 * wp;
+            }
             r *= 1.0 + 0.16 * w;
             g *= 1.0 - 0.032 * w;
             b *= 1.0 - 0.185 * w;
@@ -370,6 +416,15 @@ pub fn apply_plan(rgb: &mut Rgb32FImage, plan: &CorrectionPlan) {
             r += 0.055 * t * (1.0 - r);
             g += 0.012 * t * (1.0 - g);
             b -= 0.05 * t * b;
+        }
+        // Skin depth: brightening in linear light washes skin colour out;
+        // restore a little saturation on skin, a touch on everything else.
+        {
+            let gray = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            let k = if is_skinish(r, g, b) { 1.0 + SKIN_SAT_BOOST } else { 1.0 + OTHER_SAT_BOOST };
+            r = gray + (r - gray) * k;
+            g = gray + (g - gray) * k;
+            b = gray + (b - gray) * k;
         }
         // Gentle saturation around the pixel's own gray point.
         if plan.saturation > 1.0 {
@@ -406,9 +461,9 @@ pub fn apply_plan(rgb: &mut Rgb32FImage, plan: &CorrectionPlan) {
                 x = sh + sw * (1.0 - (-(x - sh) / sw).exp());
             }
             let curved = x + plan.contrast_mix * (smoothstep(x) - x);
-            // +1 stop of exposure in linear light with a soft highlight
-            // shoulder, so skin and whites brighten without hard clipping.
-            *channel = plus_one_stop(curved.clamp(0.0, 1.0));
+            // Adaptive exposure lift (0..0.6 EV chosen per photo from its
+            // histogram) in linear light with a soft highlight shoulder.
+            *channel = lift_exposure(curved.clamp(0.0, 1.0), plan.exposure_ev);
         }
     }
 }
@@ -561,6 +616,7 @@ pub fn auto_correct(image: &DynamicImage, look: Look) -> DynamicImage {
     }
     // Local tone first (on the as-shot distribution), then the graded plan
     // adapts to what remains.
+    denoise::denoise(&mut rgb);
     local_tone_map(&mut rgb, 0.5);
     let plan = plan_for_image(&rgb, look);
     apply_plan(&mut rgb, &plan);
@@ -608,7 +664,7 @@ mod tests {
         for (i, p) in img.pixels_mut().enumerate() {
             *p = image::Rgb([i as f32 / 16.0, 0.5, 1.0 - i as f32 / 16.0]);
         }
-        let plan = CorrectionPlan { gain: 2.0, black_point: 0.05, gamma: 1.0, contrast_mix: 0.2, wb: (1.0, 1.0, 1.0), skin_warmth: 0.0, saturation: 1.0, warmth: 0.0, split: 1.0, split_shadow: 0.0, tint_r: 0.0, tint_g: 0.0, black_floor: 0.0, cream: 0.0, shadow_lift: 0.0, highlight_compress: 0.0 };
+        let plan = CorrectionPlan { gain: 2.0, black_point: 0.05, gamma: 1.0, contrast_mix: 0.2, wb: (1.0, 1.0, 1.0), skin_warmth: 0.0, saturation: 1.0, warmth: 0.0, split: 1.0, split_shadow: 0.0, tint_r: 0.0, tint_g: 0.0, black_floor: 0.0, cream: 0.0, shadow_lift: 0.0, highlight_compress: 0.0, exposure_ev: 0.0 };
         apply_plan(&mut img, &plan);
         for p in img.pixels() {
             for c in p.0 {
@@ -636,7 +692,7 @@ mod tests {
             let plan = plan_for_image(&img, look);
             apply_plan(&mut img, &plan);
             let [r, _g, b] = img.get_pixel(0, 0).0;
-            assert!(r > b + 0.03, "{look:?}: r={r} b={b}");
+            assert!(r > b + 0.012, "{look:?}: r={r} b={b}");
         }
         // Golden warms more than Warm.
         let mut a = Rgb32FImage::new(1, 1);

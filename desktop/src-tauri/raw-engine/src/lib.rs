@@ -5,6 +5,7 @@
 //! Exposed as a small C ABI so the main app can load this as
 //! framesense_raw.dll at runtime; also usable as a plain Rust crate.
 
+pub mod denoise;
 pub mod pipeline;
 pub mod retouch;
 pub mod straighten;

@@ -248,7 +248,7 @@ fn retouch_face(
             }
             let fpx = fine.get_pixel(x - rx0, y - ry0);
             let mpx = mid.get_pixel(x - rx0, y - ry0);
-            let strength = 0.9 * m_face[i];
+            let strength = 0.45 * m_face[i];
             let mut np = [0u8; 3];
             for c in 0..3 {
                 let band = fpx[c] as f32 - mpx[c] as f32;

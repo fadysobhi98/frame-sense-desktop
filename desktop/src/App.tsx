@@ -537,7 +537,7 @@ const toggleFullscreen = async () => {
                 </label>
                 {retouch && (
                   <div className="field-note">
-                    Face retouch uses a small AI model on your PC to find facial features (offline; originals never change). Spots, skin tone, teeth and eyes are then adjusted by auto-correction, not AI generation. Moles and facial features are kept.
+                    Face retouch uses a small AI model on your PC to find facial features (offline; originals never change). Spots, skin tone, teeth and eyes are then adjusted by auto-correction, not AI generation. Moles and facial features are kept. Automatic noise reduction is a classical algorithm (wavelet filter), not AI; it keeps detail and skin texture.
                   </div>
                 )}
                 {preview && (
@@ -663,7 +663,7 @@ const toggleFullscreen = async () => {
           <footer className="content-footer">
             <span><ShieldCheck size={14}/> Local-first by design</span>
             <span><CircleHelp size={14}/> Everything runs on this PC - originals are never changed</span>
-            <span><Command size={14}/> v0.6.5</span>
+            <span><Command size={14}/> v0.6.6</span>
           </footer>
         </div>
       </main>
