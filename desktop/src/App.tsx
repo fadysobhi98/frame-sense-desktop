@@ -662,8 +662,8 @@ const toggleFullscreen = async () => {
 
           <footer className="content-footer">
             <span><ShieldCheck size={14}/> Local-first by design</span>
-            <span><CircleHelp size={14}/> Starter scaffold · not a finished product</span>
-            <span><Command size={14}/> v0.4.2</span>
+            <span><CircleHelp size={14}/> Everything runs on this PC - originals are never changed</span>
+            <span><Command size={14}/> v0.6.2</span>
           </footer>
         </div>
       </main>
@@ -684,12 +684,11 @@ const toggleFullscreen = async () => {
         </div>
         <div className="inspector-block">
           <div className="inspector-label">ENGINE STATUS</div>
-          <div className="engine-row"><span>RAW Engine</span><b className={engineStatus?.available ? "status-ok" : "status-planned"}>{engineStatus?.available ? "Connected" : "Not connected"}</b></div>
-          <div className="engine-row"><span>Local AI</span><b className="status-planned">Not connected</b></div>
-          <div className="engine-row"><span>Color Pipeline</span><b className="status-planned">Not connected</b></div>
-          <div className="engine-row"><span>Remote Sync</span><b className="status-planned">Not connected</b></div>
+          <div className="engine-row"><span>Photo Engine (RAW + colour)</span><b className={engineStatus?.available ? "status-ok" : "status-planned"}>{engineStatus?.available ? "Ready" : "Not ready"}</b></div>
+          <div className="engine-row"><span>Face Retouch (local AI model)</span><b className={engineStatus?.available ? "status-ok" : "status-planned"}>{engineStatus?.available ? "Ready - runs on this PC" : "Not ready"}</b></div>
+          <div className="engine-row"><span>Cloud / Internet</span><b className="status-ok">Not needed - all local</b></div>
         </div>
-        <div className="inspector-note"><ShieldCheck size={17}/><p>Import preserves the source. RAW development and AI processing are not enabled in this starter.</p></div>
+        <div className="inspector-note"><ShieldCheck size={17}/><p>Ready to use: pick a photo folder on the left, choose a session tone, press Start. Corrected copies go to the output folder; original photos are never changed.</p></div>
       </aside>
     </div>
   );
