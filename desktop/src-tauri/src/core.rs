@@ -537,16 +537,10 @@ pub fn run_auto_correct(
     let conn = open_project_db(&project_root)?;
 
     let output_root = match output_dir.map(str::trim).filter(|d| !d.is_empty()) {
-        Some(picked) => {
-            let root = PathBuf::from(picked);
-            fs::create_dir_all(&root)
-                .map_err(|e| format!("Could not create the output folder: {e}"))?;
-            root.canonicalize()
-                .map_err(|e| format!("Output folder not usable: {e}"))?
-        }
+        Some(picked) => canonical_for_compare(&PathBuf::from(picked)),
         None => project_root.join("Export"),
     };
-    if output_root.starts_with(project_root.join("Originals")) {
+    if output_root.starts_with(canonical_for_compare(&project_root.join("Originals"))) {
         return Err("The output folder must not be inside Originals.".into());
     }
     let output_camera_dir = output_root.join(camera_id);
@@ -685,6 +679,31 @@ fn normalize_abs(path: PathBuf) -> PathBuf {
     }
 }
 
+/// Resolve as much of the path as exists (short names, symlinks, verbatim
+/// prefixes) so equality/prefix comparisons compare the real location, then
+/// strip the Windows extended prefix for clean joins and display.
+fn canonical_for_compare(path: &Path) -> PathBuf {
+    let mut missing: Vec<std::ffi::OsString> = Vec::new();
+    let mut cursor = path.to_path_buf();
+    loop {
+        match cursor.canonicalize() {
+            Ok(mut resolved) => {
+                for comp in missing.iter().rev() {
+                    resolved.push(comp);
+                }
+                return normalize_abs(resolved);
+            }
+            Err(_) => match cursor.file_name() {
+                Some(name) => {
+                    missing.push(name.to_os_string());
+                    cursor.pop();
+                }
+                None => return normalize_abs(path.to_path_buf()),
+            },
+        }
+    }
+}
+
 fn display_path(path: &Path) -> String {
     let text = path.to_string_lossy().to_string();
     text.strip_prefix(r"\\?\")
@@ -707,11 +726,10 @@ pub fn run_auto_correct_folder(
     progress: &dyn Fn(AutoCorrectProgress),
 ) -> Result<AutoCorrectReport, String> {
     let quality = quality.clamp(50, 100);
-    let folder_root = normalize_abs(
-        PathBuf::from(folder_path.trim())
-            .canonicalize()
-            .map_err(|e| format!("Folder not found: {e}"))?,
-    );
+    let folder_root = canonical_for_compare(&PathBuf::from(folder_path.trim()));
+    if !folder_root.is_dir() {
+        return Err(format!("Folder not found: {}", folder_path.trim()));
+    }
     if !folder_root.is_dir() {
         return Err("The photo source must be a folder.".into());
     }
@@ -719,10 +737,7 @@ pub fn run_auto_correct_folder(
     // No filesystem writes yet: scan first, and only create the output
     // folder when there is at least one photo to correct.
     let output_root = match output_dir.map(str::trim).filter(|d| !d.is_empty()) {
-        Some(picked) => normalize_abs(
-            std::path::absolute(PathBuf::from(picked))
-                .map_err(|e| format!("Output folder not usable: {e}"))?,
-        ),
+        Some(picked) => canonical_for_compare(&PathBuf::from(picked)),
         None => folder_root.join("Frame Sense Corrected"),
     };
     if output_root == folder_root || folder_root.starts_with(&output_root) {
@@ -1169,10 +1184,11 @@ mod tests {
             &|_| {},
         )
         .unwrap();
-        let picked_canonical = picked.path().canonicalize().unwrap();
-        assert!(report
-            .output_dir
-            .starts_with(picked_canonical.to_string_lossy().as_ref()));
+        let picked_clean = canonical_for_compare(picked.path());
+        assert_eq!(
+            PathBuf::from(&report.output_dir),
+            picked_clean.join("Camera 1")
+        );
         assert!(PathBuf::from(&report.output_dir).join("IMG_0001.jpg").exists());
 
         let bad = run_auto_correct(
