@@ -188,9 +188,46 @@ pub fn create_project(
 
 fn is_supported_photo(path: &Path) -> bool {
     let allowed = [
-        "jpg", "jpeg", "png", "webp", "heic", "heif", "arw", "srf", "sr2", "cr2", "cr3", "crw",
-        "nef", "nrw", "raf", "orf", "rw2", "rwl", "pef", "ptx", "srw", "dng", "3fr", "fff", "iiq",
+        // Everyday image formats
+        "jpg", "jpeg", "png", "webp", "heic", "heif",
+        // Sony
+        "arw", "srf", "sr2",
+        // Canon
+        "cr2", "cr3", "crw",
+        // Nikon
+        "nef", "nrw",
+        // Fujifilm
+        "raf",
+        // Olympus / OM System
+        "orf",
+        // Panasonic / Leica
+        "rw2", "rwl",
+        // Pentax / Ricoh
+        "pef", "ptx",
+        // Samsung
+        "srw",
+        // Adobe / generic DNG
+        "dng",
+        // Hasselblad
+        "3fr", "fff",
+        // Phase One
+        "iiq",
+        // Sigma
         "x3f",
+        // Minolta / Konica Minolta
+        "mrw",
+        // Epson
+        "erf",
+        // Mamiya / Leaf
+        "mef", "mos",
+        // Kodak
+        "dcr", "k25", "kdc",
+        // GoPro
+        "gpr",
+        // Casio
+        "bay",
+        // Generic RAW extension used by some cameras
+        "raw",
     ];
     path.extension()
         .and_then(|e| e.to_str())
@@ -564,6 +601,31 @@ mod tests {
         contents.sort();
         assert_eq!(contents[0], b"different photo bytes!".to_vec());
         assert_eq!(contents[1], b"first photo bytes".to_vec());
+    }
+
+    /// Every common RAW extension is accepted, in upper and lower case.
+    #[test]
+    fn raw_extensions_accepted_any_case() {
+        let extensions = [
+            "arw", "srf", "sr2", "cr2", "cr3", "crw", "nef", "nrw", "raf", "orf", "rw2",
+            "rwl", "pef", "ptx", "srw", "dng", "3fr", "fff", "iiq", "x3f", "mrw", "erf",
+            "mef", "mos", "dcr", "k25", "kdc", "gpr", "bay", "raw",
+        ];
+        let base = TestDir::new("rawext-base");
+        let card = TestDir::new("rawext-card");
+        let project = make_project(&base);
+        for (i, ext) in extensions.iter().enumerate() {
+            let variant = if i % 2 == 0 { ext.to_string() } else { ext.to_uppercase() };
+            write_file(card.path(), &format!("DCIM/IMG_{i:04}.{variant}"), &[i as u8; 64]);
+        }
+        let result = import_camera_files(
+            &project.project_path,
+            card.path().to_str().unwrap(),
+            "Camera 1",
+        )
+        .unwrap();
+        assert_eq!(result.imported, extensions.len());
+        assert_eq!(result.skipped_unsupported, 0);
     }
 
     /// FND-009: unsupported files are skipped and reported, not copied.

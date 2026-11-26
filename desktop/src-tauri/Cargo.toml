@@ -1,6 +1,6 @@
 [package]
 name = "framesense_desktop"
-version = "0.1.0"
+version = "0.1.1"
 description = "Frame Sense Desktop foundation"
 authors = ["Frame Sense"]
 edition = "2021"
