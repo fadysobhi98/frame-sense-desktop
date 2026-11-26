@@ -6,6 +6,7 @@
 //! framesense_raw.dll at runtime; also usable as a plain Rust crate.
 
 pub mod pipeline;
+pub mod retouch;
 pub mod straighten;
 
 use image::{DynamicImage, GenericImageView};
@@ -147,6 +148,89 @@ pub fn auto_correct_file_with_look(
     Ok((w, h))
 }
 
+/// v2: decode, auto-correct with look, optional face retouch, write JPEG.
+/// `retouch` 0 = off, 1 = teeth whiten + skin texture sharpen. Retouch
+/// needs `ort_lib` (path to the onnxruntime shared library) and
+/// `model_dir` (seeta_fd_frontal_v1.0.bin + face_mesh.onnx). When retouch
+/// is off those may be null paths and are never read.
+pub fn auto_correct_file_v2(
+    src: &Path,
+    dst: &Path,
+    quality: u8,
+    look: pipeline::Look,
+    retouch: u8,
+    ort_lib: Option<&Path>,
+    model_dir: Option<&Path>,
+) -> Result<(u32, u32), String> {
+    let decoded = decode_to_dynamic(src)?;
+    let corrected = pipeline::auto_correct(&decoded, look);
+    let straightened = straighten::auto_straighten(&corrected.to_rgb32f());
+    let corrected = DynamicImage::ImageRgb32F(straightened);
+    let (w, h) = corrected.dimensions();
+    if w == 0 || h == 0 {
+        return Err("decoded image is empty".to_string());
+    }
+    let mut rgb8 = corrected.to_rgb8();
+    if retouch != 0 {
+        let ort_lib = ort_lib.ok_or_else(|| "retouch needs the onnxruntime path".to_string())?;
+        let model_dir = model_dir.ok_or_else(|| "retouch needs the model folder".to_string())?;
+        match retouch::retouch_image(&mut rgb8, ort_lib, model_dir) {
+            Ok(_) => {}
+            // Retouch failure must never block the normal export.
+            Err(e) => eprintln!("retouch skipped: {e}"),
+        }
+    }
+    let tmp: PathBuf = dst.with_extension("jpg.tmp");
+    {
+        let mut out = std::io::BufWriter::new(
+            std::fs::File::create(&tmp).map_err(|e| format!("cannot create output: {e}"))?,
+        );
+        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
+            &mut out,
+            quality.clamp(50, 100),
+        );
+        use image::ImageEncoder;
+        encoder
+            .write_image(&rgb8, w, h, image::ExtendedColorType::Rgb8)
+            .map_err(|e| format!("JPEG encode failed: {e}"))?;
+    }
+    std::fs::rename(&tmp, dst).map_err(|e| format!("cannot finalize output: {e}"))?;
+    Ok((w, h))
+}
+
+/// Small developed preview (for the retouch before/after view), returned
+/// as a base64 JPEG. Same pipeline as the real export, downscaled.
+pub fn preview_jpeg_base64(
+    src: &Path,
+    max_dim: u32,
+    look: pipeline::Look,
+    retouch: u8,
+    ort_lib: Option<&Path>,
+    model_dir: Option<&Path>,
+) -> Result<String, String> {
+    let decoded = decode_to_dynamic(src)?;
+    let corrected = pipeline::auto_correct(&decoded, look);
+    let straightened = straighten::auto_straighten(&corrected.to_rgb32f());
+    let corrected = DynamicImage::ImageRgb32F(straightened);
+    let max_dim = max_dim.clamp(256, 4096);
+    let small = corrected.resize(max_dim, max_dim, image::imageops::FilterType::Triangle);
+    let mut rgb8 = small.to_rgb8();
+    if retouch != 0 {
+        let ort_lib = ort_lib.ok_or_else(|| "retouch needs the onnxruntime path".to_string())?;
+        let model_dir = model_dir.ok_or_else(|| "retouch needs the model folder".to_string())?;
+        retouch::retouch_image(&mut rgb8, ort_lib, model_dir)?;
+    }
+    let mut buf = std::io::Cursor::new(Vec::new());
+    let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 85);
+    use image::ImageEncoder;
+    let (w, h) = rgb8.dimensions();
+    encoder
+        .write_image(&rgb8, w, h, image::ExtendedColorType::Rgb8)
+        .map_err(|e| format!("JPEG encode failed: {e}"))?;
+    use base64::Engine;
+    Ok(base64::engine::general_purpose::STANDARD.encode(buf.into_inner()))
+}
+
 // ---------------------------------------------------------------------------
 // C ABI used by the desktop app through framesense_raw.dll
 // ---------------------------------------------------------------------------
@@ -240,6 +324,92 @@ pub extern "C" fn fs_raw_auto_correct_file_look(
         Err(e) => {
             set_last_error(e);
             1
+        }
+    }
+}
+
+/// v2 entry: look + optional face retouch. Same return codes as
+/// fs_raw_auto_correct_file. ort_lib/model_dir may be null when retouch=0.
+#[no_mangle]
+pub extern "C" fn fs_raw_auto_correct_file_v2(
+    src: *const c_char,
+    dst: *const c_char,
+    quality: u8,
+    look: u8,
+    retouch: u8,
+    ort_lib: *const c_char,
+    model_dir: *const c_char,
+) -> i32 {
+    let run = || -> Result<(), String> {
+        let src = read_c_path(src, "source")?;
+        let dst = read_c_path(dst, "destination")?;
+        if !src.is_file() {
+            return Err(format!("source file not found: {}", src.display()));
+        }
+        let ort = if ort_lib.is_null() { None } else { Some(read_c_path(ort_lib, "onnxruntime")?) };
+        let models = if model_dir.is_null() { None } else { Some(read_c_path(model_dir, "model folder")?) };
+        match auto_correct_file_v2(
+            &src,
+            &dst,
+            quality,
+            pipeline::Look::from_u8(look),
+            retouch,
+            ort.as_deref(),
+            models.as_deref(),
+        ) {
+            Ok(_) => Ok(()),
+            Err(e) if e.contains("cannot create output") || e.contains("cannot finalize") => {
+                set_last_error(e);
+                return Err("io".to_string());
+            }
+            Err(e) => Err(e),
+        }
+    };
+    match run() {
+        Ok(()) => 0,
+        Err(e) if e == "io" => 2,
+        Err(e) => {
+            set_last_error(e);
+            1
+        }
+    }
+}
+
+/// Base64 JPEG preview (developed with look, optional retouch), small.
+/// Free with fs_raw_free_string. Null on failure (see fs_raw_last_error).
+#[no_mangle]
+pub extern "C" fn fs_raw_preview_jpeg(
+    src: *const c_char,
+    max_dim: u32,
+    look: u8,
+    retouch: u8,
+    ort_lib: *const c_char,
+    model_dir: *const c_char,
+) -> *mut c_char {
+    let run = || -> Result<String, String> {
+        let src = read_c_path(src, "source")?;
+        if !src.is_file() {
+            return Err(format!("source file not found: {}", src.display()));
+        }
+        let ort = if ort_lib.is_null() { None } else { Some(read_c_path(ort_lib, "onnxruntime")?) };
+        let models = if model_dir.is_null() { None } else { Some(read_c_path(model_dir, "model folder")?) };
+        preview_jpeg_base64(
+            &src,
+            max_dim,
+            pipeline::Look::from_u8(look),
+            retouch,
+            ort.as_deref(),
+            models.as_deref(),
+        )
+    };
+    match run() {
+        Ok(b64) => match CString::new(b64) {
+            Ok(c) => c.into_raw(),
+            Err(_) => std::ptr::null_mut(),
+        },
+        Err(e) => {
+            set_last_error(e);
+            std::ptr::null_mut()
         }
     }
 }

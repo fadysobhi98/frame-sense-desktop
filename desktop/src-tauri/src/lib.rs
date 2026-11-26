@@ -43,6 +43,25 @@ async fn import_camera_files(
 type FnAutoCorrect = unsafe extern "C" fn(*const std::ffi::c_char, *const std::ffi::c_char, u8) -> i32;
 type FnAutoCorrectLook =
     unsafe extern "C" fn(*const std::ffi::c_char, *const std::ffi::c_char, u8, u8) -> i32;
+#[allow(clippy::type_complexity)]
+type FnAutoCorrectV2 = unsafe extern "C" fn(
+    *const std::ffi::c_char,
+    *const std::ffi::c_char,
+    u8,
+    u8,
+    u8,
+    *const std::ffi::c_char,
+    *const std::ffi::c_char,
+) -> i32;
+#[allow(clippy::type_complexity)]
+type FnPreviewJpeg = unsafe extern "C" fn(
+    *const std::ffi::c_char,
+    u32,
+    u8,
+    u8,
+    *const std::ffi::c_char,
+    *const std::ffi::c_char,
+) -> *mut std::ffi::c_char;
 type FnLastError = unsafe extern "C" fn() -> *mut std::ffi::c_char;
 type FnFreeString = unsafe extern "C" fn(*mut std::ffi::c_char);
 type FnVersion = unsafe extern "C" fn() -> *mut std::ffi::c_char;
@@ -51,6 +70,8 @@ struct RawEngine {
     _lib: libloading::Library,
     auto_correct: FnAutoCorrect,
     auto_correct_look: Option<FnAutoCorrectLook>,
+    auto_correct_v2: Option<FnAutoCorrectV2>,
+    preview_jpeg: Option<FnPreviewJpeg>,
     last_error: FnLastError,
     free_string: FnFreeString,
     version: FnVersion,
@@ -111,10 +132,21 @@ fn load_engine() -> Result<RawEngine, String> {
             .get::<FnAutoCorrectLook>(b"fs_raw_auto_correct_file_look\0")
             .ok()
             .map(|s| *s);
+        // Optional: retouch + preview entry points (engine >= 0.5.0).
+        let auto_correct_v2 = lib
+            .get::<FnAutoCorrectV2>(b"fs_raw_auto_correct_file_v2\0")
+            .ok()
+            .map(|s| *s);
+        let preview_jpeg = lib
+            .get::<FnPreviewJpeg>(b"fs_raw_preview_jpeg\0")
+            .ok()
+            .map(|s| *s);
         Ok(RawEngine {
             _lib: lib,
             auto_correct,
             auto_correct_look,
+            auto_correct_v2,
+            preview_jpeg,
             last_error,
             free_string,
             version,
@@ -157,6 +189,86 @@ fn engine_correct_look(src: &Path, dst: &Path, quality: u8, look: u8) -> Result<
             Some(f) => f(src_c.as_ptr(), dst_c.as_ptr(), quality, look),
             None => (engine.auto_correct)(src_c.as_ptr(), dst_c.as_ptr(), quality),
         }
+    };
+    if code == 0 {
+        Ok(())
+    } else {
+        let message = unsafe { engine_string(engine, (engine.last_error)()) };
+        Err(if message.is_empty() {
+            format!("RAW engine error {code}")
+        } else {
+            message
+        })
+    }
+}
+
+/// Folder next to the engine DLL: onnxruntime and the model files are
+/// bundled there too (Tauri resources land next to the exe on Windows).
+fn engine_dir() -> Result<PathBuf, String> {
+    let dll = engine_library_path()?;
+    dll.parent()
+        .map(|p| p.to_path_buf())
+        .ok_or_else(|| "RAW engine folder is unavailable".to_string())
+}
+
+fn ort_library_path() -> Result<PathBuf, String> {
+    let file_name = if cfg!(windows) {
+        "onnxruntime.dll"
+    } else if cfg!(target_os = "macos") {
+        "libonnxruntime.dylib"
+    } else {
+        "libonnxruntime.so"
+    };
+    let path = engine_dir()?.join(file_name);
+    if path.is_file() {
+        Ok(path)
+    } else {
+        Err("Face retouch is unavailable: onnxruntime was not found next to the app.".to_string())
+    }
+}
+
+fn face_model_dir() -> Result<PathBuf, String> {
+    let dir = engine_dir()?.join("models");
+    if dir.join("face_mesh.onnx").is_file() && dir.join("seeta_fd_frontal_v1.0.bin").is_file() {
+        Ok(dir)
+    } else {
+        Err("Face retouch is unavailable: the face models are missing next to the app.".to_string())
+    }
+}
+
+fn engine_correct_look_v2(
+    src: &Path,
+    dst: &Path,
+    quality: u8,
+    look: u8,
+    retouch: bool,
+) -> Result<(), String> {
+    if !retouch {
+        return engine_correct_look(src, dst, quality, look);
+    }
+    let engine = engine()?;
+    let v2 = match engine.auto_correct_v2 {
+        Some(f) => f,
+        None => return engine_correct_look(src, dst, quality, look),
+    };
+    let src_c = CString::new(src.to_string_lossy().as_bytes())
+        .map_err(|_| "source path is not representable".to_string())?;
+    let dst_c = CString::new(dst.to_string_lossy().as_bytes())
+        .map_err(|_| "destination path is not representable".to_string())?;
+    let ort_c = CString::new(ort_library_path()?.to_string_lossy().as_bytes())
+        .map_err(|_| "onnxruntime path is not representable".to_string())?;
+    let models_c = CString::new(face_model_dir()?.to_string_lossy().as_bytes())
+        .map_err(|_| "model path is not representable".to_string())?;
+    let code = unsafe {
+        v2(
+            src_c.as_ptr(),
+            dst_c.as_ptr(),
+            quality,
+            look,
+            1,
+            ort_c.as_ptr(),
+            models_c.as_ptr(),
+        )
     };
     if code == 0 {
         Ok(())
@@ -239,6 +351,7 @@ async fn auto_correct_folder(
     quality: Option<u8>,
     look: Option<String>,
     bw: Option<bool>,
+    retouch: Option<bool>,
     on_progress: tauri::ipc::Channel<core::AutoCorrectProgress>,
 ) -> Result<core::AutoCorrectReport, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -247,8 +360,9 @@ async fn auto_correct_folder(
         let quality = quality.unwrap_or(core::DEFAULT_JPEG_QUALITY);
         let look_num = look_code(look.as_deref());
         let bw = bw.unwrap_or(true);
+        let retouch = retouch.unwrap_or(false);
         let correct = move |src: &Path, dst: &Path, q: u8| {
-            engine_correct_look(src, dst, q, look_num)
+            engine_correct_look_v2(src, dst, q, look_num, retouch)
         };
         core::run_auto_correct_folder(
             &folder_path,
@@ -260,7 +374,7 @@ async fn auto_correct_folder(
             },
             &processing_control,
             &classify::classify_output,
-            &format!("q{quality}:look{look_num}:bw{bw}"),
+            &format!("q{quality}:look{look_num}:bw{bw}:rt{retouch}"),
             bw,
         )
     })
@@ -285,6 +399,7 @@ async fn auto_correct_camera(
     quality: Option<u8>,
     look: Option<String>,
     bw: Option<bool>,
+    retouch: Option<bool>,
     on_progress: tauri::ipc::Channel<core::AutoCorrectProgress>,
 ) -> Result<core::AutoCorrectReport, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -294,8 +409,9 @@ async fn auto_correct_camera(
         let quality = quality.unwrap_or(core::DEFAULT_JPEG_QUALITY);
         let look_num = look_code(look.as_deref());
         let bw = bw.unwrap_or(true);
+        let retouch = retouch.unwrap_or(false);
         let correct = move |src: &Path, dst: &Path, q: u8| {
-            engine_correct_look(src, dst, q, look_num)
+            engine_correct_look_v2(src, dst, q, look_num, retouch)
         };
         core::run_auto_correct(
             &project_path,
@@ -308,12 +424,64 @@ async fn auto_correct_camera(
             },
             &processing_control,
             &classify::classify_output,
-            &format!("q{quality}:look{look_num}:bw{bw}"),
+            &format!("q{quality}:look{look_num}:bw{bw}:rt{retouch}"),
             bw,
         )
     })
     .await
     .map_err(|e| format!("processing failed to run: {e}"))?
+}
+
+/// Before/after preview for face retouch: [without, with] as base64 JPEGs.
+#[command]
+async fn retouch_preview(
+    photo_path: String,
+    look: Option<String>,
+) -> Result<[String; 2], String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let engine = engine()?;
+        let preview = engine
+            .preview_jpeg
+            .ok_or_else(|| "This engine build has no preview support.".to_string())?;
+        let look_num = look_code(look.as_deref());
+        let src = PathBuf::from(&photo_path);
+        let src_c = CString::new(photo_path.as_bytes())
+            .map_err(|_| "photo path is not representable".to_string())?;
+        if !src.is_file() {
+            return Err("photo not found".to_string());
+        }
+        let run_one = |retouch: u8| -> Result<String, String> {
+            let (ort_c, models_c) = if retouch == 1 {
+                (
+                    Some(CString::new(ort_library_path()?.to_string_lossy().as_bytes()).map_err(|_| "onnxruntime path is not representable".to_string())?),
+                    Some(CString::new(face_model_dir()?.to_string_lossy().as_bytes()).map_err(|_| "model path is not representable".to_string())?),
+                )
+            } else {
+                (None, None)
+            };
+            let ptr = unsafe {
+                preview(
+                    src_c.as_ptr(),
+                    1400,
+                    look_num,
+                    retouch,
+                    ort_c.as_ref().map(|c| c.as_ptr()).unwrap_or(std::ptr::null()),
+                    models_c.as_ref().map(|c| c.as_ptr()).unwrap_or(std::ptr::null()),
+                )
+            };
+            if ptr.is_null() {
+                let message = unsafe { engine_string(engine, (engine.last_error)()) };
+                Err(if message.is_empty() { "preview failed".to_string() } else { message })
+            } else {
+                Ok(unsafe { engine_string(engine, ptr) })
+            }
+        };
+        let before = run_one(0)?;
+        let after = run_one(1)?;
+        Ok([before, after])
+    })
+    .await
+    .map_err(|e| format!("preview failed to run: {e}"))?
 }
 
 pub fn run() {
@@ -325,6 +493,7 @@ pub fn run() {
             auto_correct_camera,
             auto_correct_folder,
             set_processing_control,
+            retouch_preview,
             raw_engine_status
         ])
         .run(tauri::generate_context!())

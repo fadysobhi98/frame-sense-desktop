@@ -100,6 +100,9 @@ function App() {
   const [quality, setQuality] = useState(90);
   const [look, setLook] = useState("warm");
   const [bw, setBw] = useState(true);
+  const [retouch, setRetouch] = useState(false);
+  const [previewBusy, setPreviewBusy] = useState(false);
+  const [preview, setPreview] = useState<{ before: string; after: string; name: string } | null>(null);
   const [acProgress, setAcProgress] = useState<AutoCorrectProgress | null>(null);
   const [acReport, setAcReport] = useState<AutoCorrectReport | null>(null);
   const [acBusy, setAcBusy] = useState(false);
@@ -179,13 +182,32 @@ const toggleFullscreen = async () => {
     channel.onmessage = (p) => setAcProgress(p);
     try {
       const report = await invoke<AutoCorrectReport>("auto_correct_folder", {
-        folderPath: folderSource, outputDir: outputDir.trim() || null, quality, look, bw, onProgress: channel
+        folderPath: folderSource, outputDir: outputDir.trim() || null, quality, look, bw, retouch, onProgress: channel
       });
       finishAutoCorrect(report);
     } catch (e) {
       setError(String(e));
     } finally {
       setAcBusy(false);
+    }
+  }
+
+  async function previewRetouch() {
+    setError("");
+    try {
+      const picked = await openDialog({
+        multiple: false,
+        filters: [{ name: "Photos", extensions: ["jpg", "jpeg", "nef", "cr2", "cr3", "arw", "dng", "rw2", "orf", "raf", "pef", "srw"] }],
+      });
+      if (!picked || typeof picked !== "string") return;
+      setPreviewBusy(true);
+      setPreview(null);
+      const [before, after] = await invoke<[string, string]>("retouch_preview", { photoPath: picked, look });
+      setPreview({ before, after, name: picked.split(/[\\/]/).pop() || picked });
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setPreviewBusy(false);
     }
   }
 
@@ -198,7 +220,7 @@ const toggleFullscreen = async () => {
     channel.onmessage = (p) => setAcProgress(p);
     try {
       const report = await invoke<AutoCorrectReport>("auto_correct_camera", {
-        projectPath, cameraId, outputDir: outputDir.trim() || null, quality, look, bw, onProgress: channel
+        projectPath, cameraId, outputDir: outputDir.trim() || null, quality, look, bw, retouch, onProgress: channel
       });
       finishAutoCorrect(report);
     } catch (e) {
@@ -452,6 +474,33 @@ const toggleFullscreen = async () => {
                 </select></label>
                 <label>JPEG quality: {quality}<input type="range" min={50} max={100} value={quality} onChange={(e) => setQuality(Number(e.target.value))}/></label>
                 <label><input type="checkbox" checked={bw} onChange={(e) => setBw(e.target.checked)}/> Also export a B&W folder</label>
+                <label title="Finds faces with a local AI model, then whitens teeth and sharpens skin texture. No smoothing, nothing leaves your PC.">
+                  <input type="checkbox" checked={retouch} onChange={(e) => setRetouch(e.target.checked)}/> Face retouch (whiter teeth + sharper skin)
+                </label>
+                {retouch && (
+                  <div className="field-note">
+                    Face retouch uses a small AI model on your PC to find facial features (offline; originals never change). Teeth and skin are then adjusted by auto-correction, not AI generation.
+                    <button type="button" className="secondary-button" disabled={previewBusy} onClick={previewRetouch} style={{ marginLeft: 8 }}>
+                      {previewBusy ? <RefreshCw className="spin" size={14}/> : null} Preview on a photo
+                    </button>
+                  </div>
+                )}
+                {preview && (
+                  <div className="import-summary">
+                    <strong>Retouch preview: {preview.name}</strong>
+                    <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                      <figure style={{ margin: 0, flex: 1 }}>
+                        <img src={`data:image/jpeg;base64,${preview.before}`} alt="Before" style={{ width: "100%", borderRadius: 6 }} />
+                        <figcaption className="field-note">Before</figcaption>
+                      </figure>
+                      <figure style={{ margin: 0, flex: 1 }}>
+                        <img src={`data:image/jpeg;base64,${preview.after}`} alt="After" style={{ width: "100%", borderRadius: 6 }} />
+                        <figcaption className="field-note">After face retouch</figcaption>
+                      </figure>
+                    </div>
+                    <button type="button" className="secondary-button" onClick={() => setPreview(null)}>Close preview</button>
+                  </div>
+                )}
                 <button className="primary-button full" disabled={acBusy || !folderSource.trim() || engineStatus?.available === false} onClick={startFolderCorrect}>
                   {acBusy ? <RefreshCw className="spin" size={16}/> : <WandSparkles size={16}/>} Correct this folder
                 </button>

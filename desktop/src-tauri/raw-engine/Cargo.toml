@@ -1,6 +1,6 @@
 [package]
 name = "framesense-raw"
-version = "0.4.2"
+version = "0.5.0"
 edition = "2021"
 description = "Frame Sense RAW decode + Smart Basic auto-correction engine"
 license = "LGPL-2.1-only"
@@ -16,3 +16,7 @@ rawler = "0.8"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 imageproc = "0.25"
 kamadak-exif = "0.6"
+rustface = "0.1"
+ort = { version = "2.0.0-rc.10", default-features = false, features = ["load-dynamic", "std", "ndarray"] }
+ndarray = "0.17"
+base64 = "0.22"

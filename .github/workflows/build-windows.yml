@@ -35,6 +35,13 @@ jobs:
       - name: Stage RAW engine DLL for bundling
         run: Copy-Item desktop/src-tauri/raw-engine/target/release/framesense_raw.dll desktop/src-tauri/framesense_raw.dll
 
+      - name: Download ONNX Runtime (NuGet) and stage its DLLs for bundling
+        run: |
+          Invoke-WebRequest -Uri "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/1.23.2/microsoft.ml.onnxruntime.1.23.2.nupkg" -OutFile ort.nupkg
+          Expand-Archive ort.nupkg -DestinationPath ort-pkg
+          Copy-Item ort-pkg/runtimes/win-x64/native/onnxruntime.dll desktop/src-tauri/onnxruntime.dll
+          Copy-Item ort-pkg/runtimes/win-x64/native/onnxruntime_providers_shared.dll desktop/src-tauri/onnxruntime_providers_shared.dll
+
       - name: Run core tests (project creation, safe import, auto-correction logic)
         working-directory: desktop/src-tauri
         run: cargo test
@@ -47,6 +54,6 @@ jobs:
           projectPath: desktop
           tagName: frame-sense-v__VERSION__
           releaseName: "Frame Sense v__VERSION__"
-          releaseBody: "Windows installer. Download the Frame Sense .exe under Assets, open it, and follow the installer. v0.2.0 adds Smart Basic auto-correction for RAW photos (local, not AI) and lets you choose import and output folders."
+          releaseBody: "Windows installer. Download the Frame Sense .exe under Assets, open it, and follow the installer. Local auto-correction for RAW photos, sorting, B&W export, and optional face retouch (whiter teeth + sharper skin; a local AI model finds facial features, offline, originals never change)."
           releaseDraft: false
           prerelease: true
