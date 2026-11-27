@@ -862,10 +862,6 @@ pub fn run_auto_correct_folder(
         Ok(tag) => tag.trim() != job_tag,
         Err(_) => true, // no marker: made by an older app version, redo it
     };
-    if total > 0 {
-        // Record the settings now so a stopped run resumes instead of redoing.
-        let _ = fs::write(&marker, job_tag);
-    }
 
     let mut processed = 0usize;
     let mut already_done = 0usize;
@@ -939,7 +935,7 @@ pub fn run_auto_correct_folder(
         failed: failed.len(),
     });
 
-    if !stopped && processed > 0 {
+    if processed > 0 {
         let _ = fs::write(&marker, job_tag);
     }
 
