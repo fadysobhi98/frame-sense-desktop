@@ -860,7 +860,7 @@ pub fn run_auto_correct_folder(
     let marker = output_root.join(JOB_MARKER_FILE);
     let reprocess = match fs::read_to_string(&marker) {
         Ok(tag) => tag.trim() != job_tag,
-        Err(_) => false,
+        Err(_) => true, // no marker: made by an older app version, redo it
     };
 
     let mut processed = 0usize;

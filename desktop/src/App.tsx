@@ -149,7 +149,7 @@ function App() {
   const [toneSuggestBusy, setToneSuggestBusy] = useState(false);
   const [retouch, setRetouch] = useState(true);
   const [previewBusy, setPreviewBusy] = useState(false);
-  const [preview, setPreview] = useState<{ before: string; after: string; name: string; path: string } | null>(null);
+  const [preview, setPreview] = useState<{ before: string; after: string; name: string; path: string; clipBefore: string; clipAfter: string } | null>(null);
   const [acProgress, setAcProgress] = useState<AutoCorrectProgress | null>(null);
   const [acReport, setAcReport] = useState<AutoCorrectReport | null>(null);
   const [acBusy, setAcBusy] = useState(false);
@@ -259,8 +259,8 @@ const toggleFullscreen = async () => {
       if (!picked || typeof picked !== "string") return;
       setPreviewBusy(true);
       setPreview(null);
-      const [before, after] = await invoke<[string, string]>("retouch_preview", { photoPath: picked, look, retouch });
-      setPreview({ before, after, name: picked.split(/[\\/]/).pop() || picked, path: picked });
+      const [before, after, clipBefore, clipAfter] = await invoke<[string, string, string, string]>("retouch_preview", { photoPath: picked, look, retouch });
+      setPreview({ before, after, clipBefore, clipAfter, name: picked.split(/[\\/]/).pop() || picked, path: picked });
     } catch (e) {
       setError(String(e));
     } finally {
@@ -273,8 +273,8 @@ const toggleFullscreen = async () => {
     setLook(toneId);
     setPreviewBusy(true);
     try {
-      const [before, after] = await invoke<[string, string]>("retouch_preview", { photoPath: preview.path, look: toneId, retouch });
-      setPreview({ ...preview, before, after });
+      const [before, after, clipBefore, clipAfter] = await invoke<[string, string, string, string]>("retouch_preview", { photoPath: preview.path, look: toneId, retouch });
+      setPreview({ ...preview, before, after, clipBefore, clipAfter });
     } catch (e) {
       setError(String(e));
     } finally {
@@ -618,11 +618,11 @@ const toggleFullscreen = async () => {
                     <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
                       <figure style={{ margin: 0, flex: 1 }}>
                         <img src={`data:image/jpeg;base64,${preview.before}`} alt="Before" style={{ width: "100%", borderRadius: 6 }} />
-                        <figcaption className="field-note">Before (Auto correction only)</figcaption>
+                        <figcaption className="field-note">Before: original photo, no correction. Burnt-white area: {preview.clipBefore}%</figcaption>
                       </figure>
                       <figure style={{ margin: 0, flex: 1 }}>
                         <img src={`data:image/jpeg;base64,${preview.after}`} alt="After" style={{ width: "100%", borderRadius: 6 }} />
-                        <figcaption className="field-note">After: {TONES.find((t) => t.id === look)?.label}{retouch ? " + face retouch" : ""}</figcaption>
+                        <figcaption className="field-note">After: {TONES.find((t) => t.id === look)?.label}{retouch ? " + face retouch" : ""}. Burnt-white area: {preview.clipAfter}%</figcaption>
                       </figure>
                     </div>
                     <button type="button" className="secondary-button" onClick={() => setPreview(null)}>Close preview</button>
@@ -719,7 +719,7 @@ const toggleFullscreen = async () => {
           <footer className="content-footer">
             <span><ShieldCheck size={14}/> Local-first by design</span>
             <span><CircleHelp size={14}/> Everything runs on this PC - originals are never changed</span>
-            <span><Command size={14}/> v0.6.10</span>
+            <span><Command size={14}/> v0.6.11</span>
           </footer>
         </div>
       </main>

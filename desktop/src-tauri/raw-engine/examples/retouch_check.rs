@@ -14,6 +14,6 @@ fn main() {
     println!("retouch in {:?}", t1.elapsed());
     // preview api
     let t2 = std::time::Instant::now();
-    let b64 = framesense_raw::preview_jpeg_base64(Path::new(src), 1200, look, 1, Some(Path::new(ort_lib)), Some(Path::new(model_dir))).unwrap();
+    let b64 = framesense_raw::preview_jpeg_base64(Path::new(src), 1200, look, false, 1, Some(Path::new(ort_lib)), Some(Path::new(model_dir))).unwrap();
     println!("preview b64 len {} in {:?}", b64.len(), t2.elapsed());
 }

@@ -205,24 +205,42 @@ pub fn auto_correct_file_v2(
 
 /// Small developed preview (for the retouch before/after view), returned
 /// as a base64 JPEG. Same pipeline as the real export, downscaled.
+/// Percent of pixels at or near white in the last preview made (0..100).
+static PREVIEW_CLIP: Mutex<f32> = Mutex::new(0.0);
+
+#[no_mangle]
+pub extern "C" fn fs_raw_preview_clip() -> f32 {
+    PREVIEW_CLIP.lock().map(|c| *c).unwrap_or(0.0)
+}
+
 pub fn preview_jpeg_base64(
     src: &Path,
     max_dim: u32,
     look: pipeline::Look,
+    raw_baseline: bool,
     retouch: u8,
     ort_lib: Option<&Path>,
     model_dir: Option<&Path>,
 ) -> Result<String, String> {
     let mut decoded = decode_to_dynamic(src)?;
-    if let Some(md) = model_dir {
+    if let (Some(md), false) = (model_dir, raw_baseline) {
         decoded = retouch::auto_upright(decoded, md).0;
     }
-    let corrected = pipeline::auto_correct(&decoded, look);
-    let straightened = straighten::auto_straighten(&corrected.to_rgb32f());
-    let corrected = DynamicImage::ImageRgb32F(straightened);
+    // look code 255 = the plain developed RAW with NO correction (honest "before").
+    let corrected = if raw_baseline {
+        decoded
+    } else {
+        let c = pipeline::auto_correct(&decoded, look);
+        DynamicImage::ImageRgb32F(straighten::auto_straighten(&c.to_rgb32f()))
+    };
     let max_dim = max_dim.clamp(256, 4096);
     let small = corrected.resize(max_dim, max_dim, image::imageops::FilterType::Triangle);
     let mut rgb8 = small.to_rgb8();
+    {
+        let n = (rgb8.width() * rgb8.height()) as f32;
+        let clipped = rgb8.pixels().filter(|p| (0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32) >= 250.0).count() as f32;
+        if let Ok(mut c) = PREVIEW_CLIP.lock() { *c = clipped / n * 100.0; }
+    }
     if retouch != 0 {
         let ort_lib = ort_lib.ok_or_else(|| "retouch needs the onnxruntime path".to_string())?;
         let model_dir = model_dir.ok_or_else(|| "retouch needs the model folder".to_string())?;
@@ -497,6 +515,7 @@ pub extern "C" fn fs_raw_preview_jpeg(
             &src,
             max_dim,
             pipeline::Look::from_u8(look),
+            look == 255,
             retouch,
             ort.as_deref(),
             models.as_deref(),

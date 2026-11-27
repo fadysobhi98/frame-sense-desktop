@@ -76,6 +76,7 @@ struct RawEngine {
     auto_correct_look: Option<FnAutoCorrectLook>,
     auto_correct_v2: Option<FnAutoCorrectV2>,
     preview_jpeg: Option<FnPreviewJpeg>,
+    preview_clip: Option<unsafe extern "C" fn() -> f32>,
     probe_look: Option<FnProbeLook>,
     eyes_closed: Option<FnEyesClosed>,
     set_adjust: Option<FnSetAdjust>,
@@ -152,6 +153,7 @@ fn load_engine() -> Result<RawEngine, String> {
         let probe_look = lib.get::<FnProbeLook>(b"fs_raw_probe_look\0").ok().map(|s| *s);
         let eyes_closed = lib.get::<FnEyesClosed>(b"fs_raw_eyes_closed\0").ok().map(|s| *s);
         let set_adjust = lib.get::<FnSetAdjust>(b"fs_raw_set_adjust\0").ok().map(|s| *s);
+        let preview_clip = lib.get::<unsafe extern "C" fn() -> f32>(b"fs_raw_preview_clip\0").ok().map(|s| *s);
         let set_ai_look = lib.get::<FnSetAiLook>(b"fs_raw_set_ai_look\0").ok().map(|s| *s);
         Ok(RawEngine {
             _lib: lib,
@@ -161,6 +163,7 @@ fn load_engine() -> Result<RawEngine, String> {
             auto_correct_look,
             auto_correct_v2,
             preview_jpeg,
+            preview_clip,
             probe_look,
             eyes_closed,
             last_error,
@@ -374,6 +377,19 @@ fn raw_engine_status() -> RawEngineStatus {
 }
 
 // Processing control shared by both auto-correct commands.
+/// Describes the sliders and AI look in force, so changing them (or the app
+/// version) makes a re-run redo photos instead of skipping old results.
+static EDIT_STATE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+fn edit_state_tag() -> String {
+    format!("v{}:{}", env!("CARGO_PKG_VERSION"), EDIT_STATE.lock().map(|s| s.clone()).unwrap_or_default())
+}
+static ADJ_TAG: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+static AI_TAG: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+fn refresh_edit_state() {
+    let a = ADJ_TAG.lock().map(|s| s.clone()).unwrap_or_default();
+    let b = AI_TAG.lock().map(|s| s.clone()).unwrap_or_default();
+    if let Ok(mut s) = EDIT_STATE.lock() { *s = format!("{a}{b}"); }
+}
 static PROCESSING_CONTROL: std::sync::Mutex<u8> = std::sync::Mutex::new(0); // 0 run, 1 pause, 2 stop
 
 fn processing_control() -> core::ControlAction {
@@ -410,6 +426,8 @@ fn set_processing_control(command: String) -> Result<(), String> {
 #[command]
 fn set_adjust(contrast: f32, brightness: f32, warmth: f32, fade: f32, saturation: f32) -> Result<(), String> {
     let e = engine()?;
+    if let Ok(mut t) = ADJ_TAG.lock() { *t = format!("adj{contrast:.2},{brightness:.2},{warmth:.2},{fade:.2},{saturation:.2};"); }
+    refresh_edit_state();
     if let Some(f) = e.set_adjust {
         unsafe { f(contrast, brightness, warmth, fade, saturation) };
     }
@@ -420,6 +438,8 @@ fn set_adjust(contrast: f32, brightness: f32, warmth: f32, fade: f32, saturation
 #[command]
 fn set_ai_look(enabled: bool, strength: f32) -> Result<(), String> {
     let e = engine()?;
+    if let Ok(mut t) = AI_TAG.lock() { *t = if enabled { format!("ai{strength:.2};") } else { String::new() }; }
+    refresh_edit_state();
     let f = e.set_ai_look.ok_or_else(|| "This engine build has no AI look.".to_string())?;
     let dir = engine_dir()?.join("models");
     if enabled && !(dir.join("lut3_classifier.onnx").is_file() && dir.join("lut3_luts.bin").is_file()) {
@@ -463,7 +483,7 @@ async fn auto_correct_folder(
             },
             &processing_control,
             &classify_with_eyes,
-            &format!("q{quality}:look{look_num}:bw{bw}:rt{retouch}"),
+            &format!("q{quality}:look{look_num}:bw{bw}:rt{retouch}:{}", edit_state_tag()),
             bw,
         )
     })
@@ -522,7 +542,7 @@ async fn auto_correct_camera(
             },
             &processing_control,
             &classify_with_eyes,
-            &format!("q{quality}:look{look_num}:bw{bw}:rt{retouch}"),
+            &format!("q{quality}:look{look_num}:bw{bw}:rt{retouch}:{}", edit_state_tag()),
             bw,
         )
     })
@@ -631,7 +651,7 @@ async fn retouch_preview(
     photo_path: String,
     look: Option<String>,
     retouch: Option<bool>,
-) -> Result<[String; 2], String> {
+) -> Result<[String; 4], String> {
     tauri::async_runtime::spawn_blocking(move || {
         let engine = engine()?;
         let preview = engine
@@ -675,9 +695,13 @@ async fn retouch_preview(
                 Ok(unsafe { engine_string(engine, ptr) })
             }
         };
-        let before = run_one(0, 0)?; // Natural tone, no retouch: honest baseline
+        let clip = || engine.preview_clip.map(|f| unsafe { f() }).unwrap_or(-1.0);
+        // 255 = plain developed photo with NO correction: the real "before".
+        let before = run_one(255, 0)?;
+        let clip_before = clip();
         let after = run_one(look_num, if want_retouch { 1 } else { 0 })?;
-        Ok([before, after])
+        let clip_after = clip();
+        Ok([before, after, format!("{clip_before:.1}"), format!("{clip_after:.1}")])
     })
     .await
     .map_err(|e| format!("preview failed to run: {e}"))?
